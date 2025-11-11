@@ -2,7 +2,7 @@
 -- Place this in StarterPlayer > StarterPlayerScripts or StarterGui
 -- Features: Frame editing, Undo/Redo, Mobile support, Natural walking replay, Minimize to floating icon
 
-print("=== Movement Recorder Pro - Initializing (FIXED) ===")
+print("=== Movement Recorder x - Initializing (FIXED) ===")
 
 -- ============================
 -- SERVICES
