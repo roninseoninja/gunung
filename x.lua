@@ -1,32 +1,56 @@
--- Movement Recorder Pro - Complete Frame-by-Frame Movement Recording & Editing System
+-- Movement Recorder Pro - FIXED VERSION with Error Handling
 -- Place this in StarterPlayer > StarterPlayerScripts or StarterGui
 -- Features: Frame editing, Undo/Redo, Mobile support, Natural walking replay, Minimize to floating icon
 
-print("=== Movement Recorder Pro - Initializing ===")
+print("=== Movement Recorder Pro - Initializing (FIXED) ===")
 
+-- ============================
+-- SERVICES
+-- ============================
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
 local TweenService = game:GetService("TweenService")
 
+-- ============================
+-- PLAYER SETUP
+-- ============================
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
-local character = player.Character or player.CharacterAdded:Wait()
-local humanoid = character:WaitForChild("Humanoid")
-local hrp = character:WaitForChild("HumanoidRootPart")
 
-wait(0.5)
+-- Character references (will be updated on respawn)
+local character = nil
+local humanoid = nil
+local hrp = nil
+
+-- Function to setup character references
+local function setupCharacter()
+    character = player.Character or player.CharacterAdded:Wait()
+    humanoid = character:WaitForChild("Humanoid")
+    hrp = character:WaitForChild("HumanoidRootPart")
+    print("Character setup complete")
+end
+
+-- Initial setup
+setupCharacter()
+
+-- Handle character respawning
+player.CharacterAdded:Connect(function(newCharacter)
+    print("Character respawned, updating references...")
+    wait(0.5) -- Wait for character to fully load
+    setupCharacter()
+end)
 
 -- ============================
 -- CONFIGURATION
 -- ============================
 local CONFIG = {
-    RECORD_FPS = 30, -- Frames per second for recording
+    RECORD_FPS = 30,
     PLAYBACK_DEFAULT_SPEED = 1.0,
     MAX_UNDO_STACK = 50,
-    WAYPOINT_THRESHOLD = 2.5, -- Distance to consider waypoint reached
-    MOBILE_BUTTON_SIZE = 60, -- Larger buttons for mobile
+    WAYPOINT_THRESHOLD = 2.5,
+    MOBILE_BUTTON_SIZE = 60,
     PC_BUTTON_SIZE = 40,
     FLOATING_ICON_SIZE = 50
 }
@@ -35,65 +59,42 @@ local CONFIG = {
 -- STATE MANAGEMENT
 -- ============================
 local State = {
-    -- Recording
-    frames = {}, -- Array of frame data
+    frames = {},
     isRecording = false,
     isPaused = false,
     isPlaying = false,
-    
-    -- Playback
     currentFrame = 0,
     playbackSpeed = CONFIG.PLAYBACK_DEFAULT_SPEED,
     loopEnabled = false,
-    
-    -- Editing
     selectedFrame = nil,
     undoStack = {},
     redoStack = {},
-    
-    -- UI
     isMinimized = false,
     isMobile = false,
-    
-    -- Connections
     recordConnection = nil,
     playConnection = nil,
-    
-    -- Recordings management
     savedRecordings = {},
     currentRecordingName = "Recording_1"
 }
-
--- ============================
--- FRAME DATA STRUCTURE
--- ============================
---[[
-Frame = {
-    index = number,
-    timestamp = number,
-    position = Vector3,
-    cframe = CFrame,
-    lookVector = Vector3,
-    state = HumanoidStateType,
-    isJumping = boolean,
-    isClimbing = boolean
-}
-]]
 
 -- ============================
 -- UTILITY FUNCTIONS
 -- ============================
 
 local function detectMobile()
-    local hasTouch = UserInputService.TouchEnabled
-    local hasKeyboard = UserInputService.KeyboardEnabled
-    local hasMouse = UserInputService.MouseEnabled
-    
-    -- Consider mobile if touch is enabled and either no keyboard or no mouse
-    return hasTouch and (not hasKeyboard or not hasMouse)
+    local success, result = pcall(function()
+        local hasTouch = UserInputService.TouchEnabled
+        local hasKeyboard = UserInputService.KeyboardEnabled
+        local hasMouse = UserInputService.MouseEnabled
+        return hasTouch and (not hasKeyboard or not hasMouse)
+    end)
+    return success and result or false
 end
 
 local function deepCopy(original)
+    if type(original) ~= "table" then
+        return original
+    end
     local copy = {}
     for k, v in pairs(original) do
         if type(v) == "table" then
@@ -110,7 +111,7 @@ local function saveToUndoStack()
     if #State.undoStack > CONFIG.MAX_UNDO_STACK then
         table.remove(State.undoStack, 1)
     end
-    State.redoStack = {} -- Clear redo stack on new action
+    State.redoStack = {}
 end
 
 -- ============================
@@ -118,27 +119,30 @@ end
 -- ============================
 
 local function anchorCharacter()
-    -- Anchor character to prevent falling during edits
-    if hrp then
-        hrp.Anchored = true
+    if hrp and hrp.Parent then
+        pcall(function()
+            hrp.Anchored = true
+        end)
     end
 end
 
 local function unanchorCharacter()
-    -- Unanchor character after edits
-    if hrp then
-        hrp.Anchored = false
+    if hrp and hrp.Parent then
+        pcall(function()
+            hrp.Anchored = false
+        end)
     end
 end
 
 local function teleportToFrame(frame)
-    -- Safely teleport character to frame position
-    if not frame or not hrp then return end
+    if not frame or not hrp or not hrp.Parent then return end
     
-    anchorCharacter()
-    hrp.CFrame = frame.cframe
-    wait(0.05) -- Small delay for physics to settle
-    unanchorCharacter()
+    pcall(function()
+        anchorCharacter()
+        hrp.CFrame = frame.cframe
+        wait(0.05)
+        unanchorCharacter()
+    end)
 end
 
 -- ============================
@@ -146,21 +150,27 @@ end
 -- ============================
 
 local function captureFrame()
-    local currentState = humanoid:GetState()
+    if not humanoid or not humanoid.Parent or not hrp or not hrp.Parent then
+        return nil
+    end
     
-    local frame = {
-        index = #State.frames + 1,
-        timestamp = tick(),
-        position = hrp.Position,
-        cframe = hrp.CFrame,
-        lookVector = hrp.CFrame.LookVector,
-        state = currentState,
-        isJumping = currentState == Enum.HumanoidStateType.Jumping or 
-                   currentState == Enum.HumanoidStateType.Freefall,
-        isClimbing = currentState == Enum.HumanoidStateType.Climbing
-    }
+    local success, result = pcall(function()
+        local currentState = humanoid:GetState()
+        
+        return {
+            index = #State.frames + 1,
+            timestamp = tick(),
+            position = hrp.Position,
+            cframe = hrp.CFrame,
+            lookVector = hrp.CFrame.LookVector,
+            state = currentState,
+            isJumping = currentState == Enum.HumanoidStateType.Jumping or 
+                       currentState == Enum.HumanoidStateType.Freefall,
+            isClimbing = currentState == Enum.HumanoidStateType.Climbing
+        }
+    end)
     
-    return frame
+    return success and result or nil
 end
 
 local function startRecording()
@@ -181,7 +191,9 @@ local function startRecording()
         
         if timeSinceLastFrame >= frameInterval then
             local frame = captureFrame()
-            table.insert(State.frames, frame)
+            if frame then
+                table.insert(State.frames, frame)
+            end
             timeSinceLastFrame = 0
         end
     end)
@@ -202,20 +214,30 @@ end
 -- ============================
 
 local function interpolateFrames(frame1, frame2, alpha)
-    -- Smooth interpolation between two frames
-    return {
-        position = frame1.position:Lerp(frame2.position, alpha),
-        cframe = frame1.cframe:Lerp(frame2.cframe, alpha),
-        lookVector = frame1.lookVector:Lerp(frame2.lookVector, alpha),
-        isJumping = frame2.isJumping,
-        isClimbing = frame2.isClimbing
-    }
+    if not frame1 or not frame2 then return frame1 end
+    
+    local success, result = pcall(function()
+        return {
+            position = frame1.position:Lerp(frame2.position, alpha),
+            cframe = frame1.cframe:Lerp(frame2.cframe, alpha),
+            lookVector = frame1.lookVector:Lerp(frame2.lookVector, alpha),
+            isJumping = frame2.isJumping,
+            isClimbing = frame2.isClimbing
+        }
+    end)
+    
+    return success and result or frame1
 end
 
 local function playRecording()
     if State.isRecording or State.isPlaying or #State.frames == 0 then 
         print("Cannot play: no frames or already playing")
         return 
+    end
+    
+    if not humanoid or not humanoid.Parent then
+        warn("Cannot play: humanoid not found")
+        return
     end
     
     print("Playback started with", #State.frames, "frames")
@@ -227,6 +249,10 @@ local function playRecording()
     
     State.playConnection = RunService.Heartbeat:Connect(function(deltaTime)
         if not State.isPlaying or State.isPaused then return end
+        if not humanoid or not humanoid.Parent or not hrp or not hrp.Parent then
+            stopPlayback()
+            return
+        end
         
         local adjustedDelta = deltaTime * State.playbackSpeed
         State.currentFrame = State.currentFrame + (adjustedDelta * CONFIG.RECORD_FPS)
@@ -247,44 +273,42 @@ local function playRecording()
         local nextFrame = State.frames[frameIndex + 1]
         
         if frame then
-            -- Use Humanoid:MoveTo() for natural walking - NO TELEPORTING!
-            local targetPosition = frame.position
-            
-            if nextFrame then
-                local alpha = State.currentFrame - frameIndex
-                local interpolated = interpolateFrames(frame, nextFrame, alpha)
-                targetPosition = interpolated.position
-            end
-            
-            -- Move naturally using Humanoid
-            humanoid:MoveTo(targetPosition)
-            
-            -- Handle jumping
-            if frame.isJumping then
-                local currentState = humanoid:GetState()
-                if currentState ~= Enum.HumanoidStateType.Jumping and 
-                   currentState ~= Enum.HumanoidStateType.Freefall then
-                    humanoid.Jump = true
+            pcall(function()
+                local targetPosition = frame.position
+                
+                if nextFrame then
+                    local alpha = State.currentFrame - frameIndex
+                    local interpolated = interpolateFrames(frame, nextFrame, alpha)
+                    if interpolated then
+                        targetPosition = interpolated.position
+                    end
                 end
-            end
-            
-            -- Handle climbing
-            if frame.isClimbing then
-                humanoid:ChangeState(Enum.HumanoidStateType.Climbing)
-            end
-            
-            -- Check if stuck
-            local distanceToTarget = (targetPosition - hrp.Position).Magnitude
-            if distanceToTarget < CONFIG.WAYPOINT_THRESHOLD then
-                moveTimeout = 0
-            else
-                moveTimeout = moveTimeout + deltaTime
-                if moveTimeout > maxMoveTimeout then
-                    -- Skip to next frame if stuck
-                    State.currentFrame = frameIndex + 1
+                
+                humanoid:MoveTo(targetPosition)
+                
+                if frame.isJumping then
+                    local currentState = humanoid:GetState()
+                    if currentState ~= Enum.HumanoidStateType.Jumping and 
+                       currentState ~= Enum.HumanoidStateType.Freefall then
+                        humanoid.Jump = true
+                    end
+                end
+                
+                if frame.isClimbing then
+                    humanoid:ChangeState(Enum.HumanoidStateType.Climbing)
+                end
+                
+                local distanceToTarget = (targetPosition - hrp.Position).Magnitude
+                if distanceToTarget < CONFIG.WAYPOINT_THRESHOLD then
                     moveTimeout = 0
+                else
+                    moveTimeout = moveTimeout + deltaTime
+                    if moveTimeout > maxMoveTimeout then
+                        State.currentFrame = frameIndex + 1
+                        moveTimeout = 0
+                    end
                 end
-            end
+            end)
         end
     end)
 end
@@ -326,11 +350,11 @@ local function insertFrame(atIndex)
     saveToUndoStack()
     
     local newFrame = captureFrame()
-    newFrame.index = atIndex
+    if not newFrame then return end
     
+    newFrame.index = atIndex
     table.insert(State.frames, atIndex, newFrame)
     
-    -- Reindex frames
     for i = atIndex + 1, #State.frames do
         State.frames[i].index = i
     end
@@ -342,10 +366,8 @@ local function deleteFrame(frameIndex)
     if frameIndex < 1 or frameIndex > #State.frames then return end
     
     saveToUndoStack()
-    
     table.remove(State.frames, frameIndex)
     
-    -- Reindex frames
     for i = frameIndex, #State.frames do
         State.frames[i].index = i
     end
@@ -355,20 +377,23 @@ end
 
 local function modifyFrame(frameIndex, newData)
     if frameIndex < 1 or frameIndex > #State.frames then return end
+    if not hrp or not hrp.Parent then return end
     
     saveToUndoStack()
     
     local frame = State.frames[frameIndex]
     
-    if newData.position then
-        frame.position = newData.position
-        frame.cframe = CFrame.new(newData.position) * CFrame.Angles(0, math.atan2(frame.lookVector.X, frame.lookVector.Z), 0)
-    end
-    
-    if newData.rotation then
-        frame.cframe = CFrame.new(frame.position) * newData.rotation
-        frame.lookVector = frame.cframe.LookVector
-    end
+    pcall(function()
+        if newData.position then
+            frame.position = newData.position
+            frame.cframe = CFrame.new(newData.position) * CFrame.Angles(0, math.atan2(frame.lookVector.X, frame.lookVector.Z), 0)
+        end
+        
+        if newData.rotation then
+            frame.cframe = CFrame.new(frame.position) * newData.rotation
+            frame.lookVector = frame.cframe.LookVector
+        end
+    end)
     
     print("Frame modified at index", frameIndex)
 end
@@ -379,13 +404,9 @@ local function undo()
         return 
     end
     
-    -- Save current state to redo stack
     table.insert(State.redoStack, deepCopy(State.frames))
-    
-    -- Restore previous state
     State.frames = table.remove(State.undoStack)
     
-    -- Keep character stable during undo
     if State.selectedFrame and State.frames[State.selectedFrame] then
         teleportToFrame(State.frames[State.selectedFrame])
     end
@@ -399,13 +420,9 @@ local function redo()
         return 
     end
     
-    -- Save current state to undo stack
     table.insert(State.undoStack, deepCopy(State.frames))
-    
-    -- Restore redo state
     State.frames = table.remove(State.redoStack)
     
-    -- Keep character stable during redo
     if State.selectedFrame and State.frames[State.selectedFrame] then
         teleportToFrame(State.frames[State.selectedFrame])
     end
@@ -429,19 +446,28 @@ local function serializeRecording()
     }
     
     for i, frame in ipairs(State.frames) do
-        table.insert(data.frames, {
-            index = frame.index,
-            timestamp = frame.timestamp,
-            position = {frame.position.X, frame.position.Y, frame.position.Z},
-            cframe = {frame.cframe:GetComponents()},
-            lookVector = {frame.lookVector.X, frame.lookVector.Y, frame.lookVector.Z},
-            state = tostring(frame.state),
-            isJumping = frame.isJumping,
-            isClimbing = frame.isClimbing
-        })
+        local success = pcall(function()
+            table.insert(data.frames, {
+                index = frame.index,
+                timestamp = frame.timestamp,
+                position = {frame.position.X, frame.position.Y, frame.position.Z},
+                cframe = {frame.cframe:GetComponents()},
+                lookVector = {frame.lookVector.X, frame.lookVector.Y, frame.lookVector.Z},
+                state = tostring(frame.state),
+                isJumping = frame.isJumping,
+                isClimbing = frame.isClimbing
+            })
+        end)
+        if not success then
+            warn("Failed to serialize frame", i)
+        end
     end
     
-    return HttpService:JSONEncode(data)
+    local success, jsonData = pcall(function()
+        return HttpService:JSONEncode(data)
+    end)
+    
+    return success and jsonData or nil
 end
 
 local function deserializeRecording(jsonData)
@@ -449,7 +475,7 @@ local function deserializeRecording(jsonData)
         return HttpService:JSONDecode(jsonData)
     end)
     
-    if not success then
+    if not success or not data then
         warn("Failed to deserialize recording")
         return false
     end
@@ -457,17 +483,20 @@ local function deserializeRecording(jsonData)
     State.frames = {}
     
     for i, frameData in ipairs(data.frames) do
-        local frame = {
-            index = frameData.index,
-            timestamp = frameData.timestamp,
-            position = Vector3.new(frameData.position[1], frameData.position[2], frameData.position[3]),
-            cframe = CFrame.new(unpack(frameData.cframe)),
-            lookVector = Vector3.new(frameData.lookVector[1], frameData.lookVector[2], frameData.lookVector[3]),
-            state = Enum.HumanoidStateType[frameData.state:match("HumanoidStateType%.(.+)")],
-            isJumping = frameData.isJumping,
-            isClimbing = frameData.isClimbing
-        }
-        table.insert(State.frames, frame)
+        pcall(function()
+            local stateString = frameData.state:match("HumanoidStateType%.(.+)") or "Running"
+            local frame = {
+                index = frameData.index,
+                timestamp = frameData.timestamp,
+                position = Vector3.new(frameData.position[1], frameData.position[2], frameData.position[3]),
+                cframe = CFrame.new(unpack(frameData.cframe)),
+                lookVector = Vector3.new(frameData.lookVector[1], frameData.lookVector[2], frameData.lookVector[3]),
+                state = Enum.HumanoidStateType[stateString],
+                isJumping = frameData.isJumping,
+                isClimbing = frameData.isClimbing
+            }
+            table.insert(State.frames, frame)
+        end)
     end
     
     State.currentRecordingName = data.name
@@ -477,13 +506,12 @@ end
 
 local function saveRecording()
     local jsonData = serializeRecording()
-    State.savedRecordings[State.currentRecordingName] = jsonData
-    print("Recording saved:", State.currentRecordingName)
-    
-    -- In a real game, you'd save to DataStore here:
-    -- pcall(function()
-    --     DataStoreService:GetDataStore("Recordings"):SetAsync(player.UserId, State.savedRecordings)
-    -- end)
+    if jsonData then
+        State.savedRecordings[State.currentRecordingName] = jsonData
+        print("Recording saved:", State.currentRecordingName)
+    else
+        warn("Failed to save recording")
+    end
 end
 
 local function loadRecording(name)
@@ -507,7 +535,6 @@ screenGui.Name = "MovementRecorderPro"
 screenGui.ResetOnSpawn = false
 screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
--- Main Frame (Full GUI)
 local mainFrame = Instance.new("Frame")
 mainFrame.Name = "MainFrame"
 mainFrame.Size = UDim2.new(0.8, 0, 0.85, 0)
@@ -516,10 +543,9 @@ mainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
 mainFrame.BorderSizePixel = 2
 mainFrame.BorderColor3 = Color3.fromRGB(0, 200, 255)
 mainFrame.Active = true
-mainFrame.Draggable = not State.isMobile -- Only draggable on PC
+mainFrame.Draggable = not State.isMobile
 mainFrame.Parent = screenGui
 
--- Floating Icon (Minimized state)
 local floatingIcon = Instance.new("ImageButton")
 floatingIcon.Name = "FloatingIcon"
 floatingIcon.Size = UDim2.new(0, CONFIG.FLOATING_ICON_SIZE, 0, CONFIG.FLOATING_ICON_SIZE)
@@ -532,12 +558,10 @@ floatingIcon.Active = true
 floatingIcon.Draggable = true
 floatingIcon.Parent = screenGui
 
--- Add rounded corners to floating icon
 local iconCorner = Instance.new("UICorner")
 iconCorner.CornerRadius = UDim.new(0.5, 0)
 iconCorner.Parent = floatingIcon
 
--- Icon label
 local iconLabel = Instance.new("TextLabel")
 iconLabel.Size = UDim2.new(1, 0, 1, 0)
 iconLabel.BackgroundTransparency = 1
@@ -547,7 +571,6 @@ iconLabel.Font = Enum.Font.GothamBold
 iconLabel.TextSize = 24
 iconLabel.Parent = floatingIcon
 
--- Title Bar
 local titleBar = Instance.new("Frame")
 titleBar.Name = "TitleBar"
 titleBar.Size = UDim2.new(1, 0, 0, 50)
@@ -566,7 +589,6 @@ titleLabel.TextSize = State.isMobile and 18 or 20
 titleLabel.TextXAlignment = Enum.TextXAlignment.Left
 titleLabel.Parent = titleBar
 
--- Minimize Button
 local minimizeBtn = Instance.new("TextButton")
 minimizeBtn.Name = "MinimizeBtn"
 minimizeBtn.Size = UDim2.new(0, 40, 0, 40)
@@ -582,7 +604,6 @@ local minimizeCorner = Instance.new("UICorner")
 minimizeCorner.CornerRadius = UDim.new(0.2, 0)
 minimizeCorner.Parent = minimizeBtn
 
--- Close Button
 local closeBtn = Instance.new("TextButton")
 closeBtn.Name = "CloseBtn"
 closeBtn.Size = UDim2.new(0, 40, 0, 40)
@@ -598,7 +619,6 @@ local closeCorner = Instance.new("UICorner")
 closeCorner.CornerRadius = UDim.new(0.2, 0)
 closeCorner.Parent = closeBtn
 
--- Content Frame
 local contentFrame = Instance.new("Frame")
 contentFrame.Name = "ContentFrame"
 contentFrame.Size = UDim2.new(1, -20, 1, -70)
@@ -606,7 +626,6 @@ contentFrame.Position = UDim2.new(0, 10, 0, 60)
 contentFrame.BackgroundTransparency = 1
 contentFrame.Parent = mainFrame
 
--- Button creation helper
 local function createButton(name, text, position, size, color)
     local button = Instance.new("TextButton")
     button.Name = name
@@ -628,7 +647,6 @@ local function createButton(name, text, position, size, color)
     return button
 end
 
--- Recording Controls Section
 local recordBtn = createButton("RecordBtn", "⏺ RECORD", 
     UDim2.new(0, 0, 0, 0), 
     UDim2.new(0.32, -5, 0, buttonSize), 
@@ -654,7 +672,6 @@ local loopBtn = createButton("LoopBtn", "🔁 LOOP: OFF",
     UDim2.new(0.49, 0, 0, buttonSize * 0.8), 
     Color3.fromRGB(100, 150, 100))
 
--- Status Display
 local statusBox = Instance.new("Frame")
 statusBox.Name = "StatusBox"
 statusBox.Size = UDim2.new(1, 0, 0, 80)
@@ -677,7 +694,6 @@ statusLabel.TextXAlignment = Enum.TextXAlignment.Left
 statusLabel.TextWrapped = true
 statusLabel.Parent = statusBox
 
--- Speed Control
 local speedLabel = Instance.new("TextLabel")
 speedLabel.Size = UDim2.new(1, 0, 0, 20)
 speedLabel.Position = UDim2.new(0, 0, 0, buttonSize * 1.9 + 110)
@@ -698,13 +714,12 @@ speedSlider.BorderColor3 = Color3.fromRGB(100, 100, 120)
 speedSlider.Parent = contentFrame
 
 local speedButton = Instance.new("TextButton")
-speedButton.Size = UDim2.new(0, State.isMobile and 30 : 20, 1, 0)
+speedButton.Size = UDim2.new(0, State.isMobile and 30 or 20, 1, 0)
 speedButton.Position = UDim2.new(0.5, -(State.isMobile and 15 or 10), 0, 0)
 speedButton.BackgroundColor3 = Color3.fromRGB(0, 200, 255)
 speedButton.Text = ""
 speedButton.Parent = speedSlider
 
--- Timeline Scrubber
 local timelineLabel = Instance.new("TextLabel")
 timelineLabel.Size = UDim2.new(1, 0, 0, 20)
 timelineLabel.Position = UDim2.new(0, 0, 0, buttonSize * 1.9 + 180)
@@ -731,7 +746,6 @@ timelineButton.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
 timelineButton.Text = ""
 timelineButton.Parent = timelineBar
 
--- Editing Controls
 local editLabel = Instance.new("TextLabel")
 editLabel.Size = UDim2.new(1, 0, 0, 25)
 editLabel.Position = UDim2.new(0, 0, 0, buttonSize * 1.9 + 250)
@@ -768,7 +782,6 @@ local redoBtn = createButton("RedoBtn", "↷ REDO",
     UDim2.new(0.49, 0, 0, buttonSize * 0.8), 
     Color3.fromRGB(100, 100, 150))
 
--- Save/Load Controls
 local saveLoadLabel = Instance.new("TextLabel")
 saveLoadLabel.Size = UDim2.new(1, 0, 0, 25)
 saveLoadLabel.Position = UDim2.new(0, 0, 0, buttonSize * 1.9 + 280 + buttonSize * 1.8)
@@ -790,7 +803,6 @@ local loadBtn = createButton("LoadBtn", "📂 LOAD",
     UDim2.new(0.49, 0, 0, buttonSize * 0.8), 
     Color3.fromRGB(100, 150, 200))
 
--- Info Box
 local infoBox = Instance.new("Frame")
 infoBox.Size = UDim2.new(1, 0, 0, 70)
 infoBox.Position = UDim2.new(0, 0, 1, -75)
@@ -819,45 +831,53 @@ screenGui.Parent = playerGui
 -- ============================
 
 local function updateStatus()
-    local status = "Ready"
-    
-    if State.isRecording then
-        status = "🔴 RECORDING"
-    elseif State.isPlaying then
-        if State.isPaused then
-            status = "⏸ PAUSED"
-        else
-            status = "▶ PLAYING"
+    pcall(function()
+        local status = "Ready"
+        
+        if State.isRecording then
+            status = "🔴 RECORDING"
+        elseif State.isPlaying then
+            if State.isPaused then
+                status = "⏸ PAUSED"
+            else
+                status = "▶ PLAYING"
+            end
         end
-    end
-    
-    local frameText = string.format("Frames: %d\nCurrent Frame: %d/%d", 
-        #State.frames, 
-        math.floor(State.currentFrame), 
-        #State.frames)
-    
-    statusLabel.Text = string.format("Status: %s\n%s\nMode: Natural Humanoid Walking", status, frameText)
+        
+        local frameText = string.format("Frames: %d\nCurrent Frame: %d/%d", 
+            #State.frames, 
+            math.floor(State.currentFrame), 
+            #State.frames)
+        
+        statusLabel.Text = string.format("Status: %s\n%s\nMode: Natural Humanoid Walking", status, frameText)
+    end)
 end
 
 local function updateSpeedLabel()
-    speedLabel.Text = string.format("Playback Speed: %.1fx", State.playbackSpeed)
+    pcall(function()
+        speedLabel.Text = string.format("Playback Speed: %.1fx", State.playbackSpeed)
+    end)
 end
 
 local function updateTimelinePosition()
-    if #State.frames > 0 then
-        local progress = math.clamp(State.currentFrame / #State.frames, 0, 1)
-        timelineButton.Position = UDim2.new(progress, -(timelineButton.AbsoluteSize.X / 2), 0, 0)
-    end
+    pcall(function()
+        if #State.frames > 0 and timelineButton and timelineButton.Parent then
+            local progress = math.clamp(State.currentFrame / #State.frames, 0, 1)
+            timelineButton.Position = UDim2.new(progress, -(timelineButton.AbsoluteSize.X / 2), 0, 0)
+        end
+    end)
 end
 
 local function updateLoopButton()
-    if State.loopEnabled then
-        loopBtn.Text = "🔁 LOOP: ON"
-        loopBtn.BackgroundColor3 = Color3.fromRGB(50, 200, 100)
-    else
-        loopBtn.Text = "🔁 LOOP: OFF"
-        loopBtn.BackgroundColor3 = Color3.fromRGB(100, 150, 100)
-    end
+    pcall(function()
+        if State.loopEnabled then
+            loopBtn.Text = "🔁 LOOP: ON"
+            loopBtn.BackgroundColor3 = Color3.fromRGB(50, 200, 100)
+        else
+            loopBtn.Text = "🔁 LOOP: OFF"
+            loopBtn.BackgroundColor3 = Color3.fromRGB(100, 150, 100)
+        end
+    end)
 end
 
 -- ============================
@@ -867,52 +887,52 @@ end
 local function minimizeGUI()
     State.isMinimized = true
     
-    -- Animate main frame out
-    local tweenInfo = TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In)
-    local tween = TweenService:Create(mainFrame, tweenInfo, {
-        Size = UDim2.new(0, 0, 0, 0),
-        Position = UDim2.new(0.5, 0, 0.5, 0)
-    })
-    tween:Play()
-    
-    tween.Completed:Connect(function()
-        mainFrame.Visible = false
-        floatingIcon.Visible = true
+    pcall(function()
+        local tweenInfo = TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In)
+        local tween = TweenService:Create(mainFrame, tweenInfo, {
+            Size = UDim2.new(0, 0, 0, 0),
+            Position = UDim2.new(0.5, 0, 0.5, 0)
+        })
+        tween:Play()
         
-        -- Animate floating icon in
-        floatingIcon.Size = UDim2.new(0, 0, 0, 0)
-        local iconTween = TweenService:Create(floatingIcon, 
-            TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), 
-            {Size = UDim2.new(0, CONFIG.FLOATING_ICON_SIZE, 0, CONFIG.FLOATING_ICON_SIZE)})
-        iconTween:Play()
+        tween.Completed:Connect(function()
+            mainFrame.Visible = false
+            floatingIcon.Visible = true
+            
+            floatingIcon.Size = UDim2.new(0, 0, 0, 0)
+            local iconTween = TweenService:Create(floatingIcon, 
+                TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), 
+                {Size = UDim2.new(0, CONFIG.FLOATING_ICON_SIZE, 0, CONFIG.FLOATING_ICON_SIZE)})
+            iconTween:Play()
+        end)
     end)
 end
 
 local function expandGUI()
     State.isMinimized = false
     
-    -- Animate floating icon out
-    local tweenInfo = TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In)
-    local tween = TweenService:Create(floatingIcon, tweenInfo, {
-        Size = UDim2.new(0, 0, 0, 0)
-    })
-    tween:Play()
-    
-    tween.Completed:Connect(function()
-        floatingIcon.Visible = false
-        mainFrame.Visible = true
+    pcall(function()
+        local tweenInfo = TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In)
+        local tween = TweenService:Create(floatingIcon, tweenInfo, {
+            Size = UDim2.new(0, 0, 0, 0)
+        })
+        tween:Play()
         
-        -- Animate main frame in
-        mainFrame.Size = UDim2.new(0, 0, 0, 0)
-        mainFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
-        
-        local mainTween = TweenService:Create(mainFrame, 
-            TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), 
-            {
-                Size = UDim2.new(0.8, 0, 0.85, 0),
-                Position = UDim2.new(0.1, 0, 0.075, 0)
-            })
-        mainTween:Play()
+        tween.Completed:Connect(function()
+            floatingIcon.Visible = false
+            mainFrame.Visible = true
+            
+            mainFrame.Size = UDim2.new(0, 0, 0, 0)
+            mainFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+            
+            local mainTween = TweenService:Create(mainFrame, 
+                TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), 
+                {
+                    Size = UDim2.new(0.8, 0, 0.85, 0),
+                    Position = UDim2.new(0.1, 0, 0.075, 0)
+                })
+            mainTween:Play()
+        end)
     end)
 end
 
@@ -921,82 +941,104 @@ end
 -- ============================
 
 recordBtn.MouseButton1Click:Connect(function()
-    startRecording()
-    updateStatus()
+    pcall(function()
+        startRecording()
+        updateStatus()
+    end)
 end)
 
 stopBtn.MouseButton1Click:Connect(function()
-    stopRecording()
-    stopPlayback()
-    updateStatus()
+    pcall(function()
+        stopRecording()
+        stopPlayback()
+        updateStatus()
+    end)
 end)
 
 playBtn.MouseButton1Click:Connect(function()
-    playRecording()
-    updateStatus()
+    pcall(function()
+        playRecording()
+        updateStatus()
+    end)
 end)
 
 pauseBtn.MouseButton1Click:Connect(function()
-    pausePlayback()
-    updateStatus()
+    pcall(function()
+        pausePlayback()
+        updateStatus()
+    end)
 end)
 
 loopBtn.MouseButton1Click:Connect(function()
-    State.loopEnabled = not State.loopEnabled
-    updateLoopButton()
+    pcall(function()
+        State.loopEnabled = not State.loopEnabled
+        updateLoopButton()
+    end)
 end)
 
 insertBtn.MouseButton1Click:Connect(function()
-    if State.selectedFrame and State.selectedFrame > 0 then
-        insertFrame(State.selectedFrame)
+    pcall(function()
+        if State.selectedFrame and State.selectedFrame > 0 then
+            insertFrame(State.selectedFrame)
+        else
+            insertFrame(#State.frames + 1)
+        end
         updateStatus()
-    else
-        insertFrame(#State.frames + 1)
-        updateStatus()
-    end
+    end)
 end)
 
 deleteBtn.MouseButton1Click:Connect(function()
-    if State.selectedFrame and State.selectedFrame > 0 then
-        deleteFrame(State.selectedFrame)
-        State.selectedFrame = nil
-        updateStatus()
-    end
+    pcall(function()
+        if State.selectedFrame and State.selectedFrame > 0 then
+            deleteFrame(State.selectedFrame)
+            State.selectedFrame = nil
+            updateStatus()
+        end
+    end)
 end)
 
 modifyBtn.MouseButton1Click:Connect(function()
-    if State.selectedFrame and State.selectedFrame > 0 then
-        -- Modify selected frame to current position
-        modifyFrame(State.selectedFrame, {position = hrp.Position})
-        updateStatus()
-    end
+    pcall(function()
+        if State.selectedFrame and State.selectedFrame > 0 and hrp and hrp.Parent then
+            modifyFrame(State.selectedFrame, {position = hrp.Position})
+            updateStatus()
+        end
+    end)
 end)
 
 undoBtn.MouseButton1Click:Connect(function()
-    undo()
-    updateStatus()
+    pcall(function()
+        undo()
+        updateStatus()
+    end)
 end)
 
 redoBtn.MouseButton1Click:Connect(function()
-    redo()
-    updateStatus()
+    pcall(function()
+        redo()
+        updateStatus()
+    end)
 end)
 
 saveBtn.MouseButton1Click:Connect(function()
-    saveRecording()
+    pcall(saveRecording)
 end)
 
 loadBtn.MouseButton1Click:Connect(function()
-    -- For demo purposes, load the most recent recording
-    if State.savedRecordings[State.currentRecordingName] then
-        loadRecording(State.currentRecordingName)
-        updateStatus()
-    end
+    pcall(function()
+        if State.savedRecordings[State.currentRecordingName] then
+            loadRecording(State.currentRecordingName)
+            updateStatus()
+        end
+    end)
 end)
 
 minimizeBtn.MouseButton1Click:Connect(minimizeGUI)
+
 closeBtn.MouseButton1Click:Connect(function()
-    mainFrame.Visible = false
+    pcall(function()
+        mainFrame.Visible = false
+    end)
 end)
 
 floatingIcon.MouseButton1Click:Connect(expandGUI)
@@ -1018,15 +1060,16 @@ end)
 UserInputService.InputChanged:Connect(function(input)
     if speedDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or 
                           input.UserInputType == Enum.UserInputType.Touch) then
-        local relativePos = math.clamp((input.Position.X - speedSlider.AbsolutePosition.X) / speedSlider.AbsoluteSize.X, 0, 1)
-        speedButton.Position = UDim2.new(relativePos, -(speedButton.AbsoluteSize.X / 2), 0, 0)
-        State.playbackSpeed = 0.25 + (relativePos * 2.75) -- 0.25x to 3.0x speed
-        updateSpeedLabel()
-        
-        -- Adjust humanoid WalkSpeed during playback
-        if State.isPlaying then
-            humanoid.WalkSpeed = 16 * State.playbackSpeed
-        end
+        pcall(function()
+            local relativePos = math.clamp((input.Position.X - speedSlider.AbsolutePosition.X) / speedSlider.AbsoluteSize.X, 0, 1)
+            speedButton.Position = UDim2.new(relativePos, -(speedButton.AbsoluteSize.X / 2), 0, 0)
+            State.playbackSpeed = 0.25 + (relativePos * 2.75)
+            updateSpeedLabel()
+            
+            if State.isPlaying and humanoid and humanoid.Parent then
+                humanoid.WalkSpeed = 16 * State.playbackSpeed
+            end
+        end)
     end
 end)
 
@@ -1047,19 +1090,21 @@ end)
 UserInputService.InputChanged:Connect(function(input)
     if timelineDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or 
                              input.UserInputType == Enum.UserInputType.Touch) then
-        local relativePos = math.clamp((input.Position.X - timelineBar.AbsolutePosition.X) / timelineBar.AbsoluteSize.X, 0, 1)
-        
-        if #State.frames > 0 then
-            local targetFrame = math.floor(relativePos * #State.frames) + 1
-            State.selectedFrame = targetFrame
+        pcall(function()
+            local relativePos = math.clamp((input.Position.X - timelineBar.AbsolutePosition.X) / timelineBar.AbsoluteSize.X, 0, 1)
             
-            if not State.isPlaying then
-                scrubToFrame(targetFrame)
+            if #State.frames > 0 then
+                local targetFrame = math.floor(relativePos * #State.frames) + 1
+                State.selectedFrame = targetFrame
+                
+                if not State.isPlaying then
+                    scrubToFrame(targetFrame)
+                end
+                
+                updateTimelinePosition()
+                updateStatus()
             end
-            
-            updateTimelinePosition()
-            updateStatus()
-        end
+        end)
     end
 end)
 
@@ -1068,8 +1113,10 @@ end)
 -- ============================
 
 RunService.Heartbeat:Connect(function()
-    updateStatus()
-    updateTimelinePosition()
+    pcall(function()
+        updateStatus()
+        updateTimelinePosition()
+    end)
 end)
 
 -- Keyboard Controls (PC only)
@@ -1077,25 +1124,27 @@ if not State.isMobile then
     UserInputService.InputBegan:Connect(function(input, gameProcessed)
         if gameProcessed then return end
         
-        if input.KeyCode == Enum.KeyCode.RightShift then
-            if State.isMinimized then
-                expandGUI()
-            else
-                mainFrame.Visible = not mainFrame.Visible
+        pcall(function()
+            if input.KeyCode == Enum.KeyCode.RightShift then
+                if State.isMinimized then
+                    expandGUI()
+                else
+                    mainFrame.Visible = not mainFrame.Visible
+                end
+            elseif input.KeyCode == Enum.KeyCode.R and not State.isRecording then
+                startRecording()
+            elseif input.KeyCode == Enum.KeyCode.S and State.isRecording then
+                stopRecording()
+            elseif input.KeyCode == Enum.KeyCode.P and not State.isPlaying then
+                playRecording()
+            elseif input.KeyCode == Enum.KeyCode.Space and State.isPlaying then
+                pausePlayback()
+            elseif input.KeyCode == Enum.KeyCode.Z and UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
+                undo()
+            elseif input.KeyCode == Enum.KeyCode.Y and UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
+                redo()
             end
-        elseif input.KeyCode == Enum.KeyCode.R and not State.isRecording then
-            startRecording()
-        elseif input.KeyCode == Enum.KeyCode.S and State.isRecording then
-            stopRecording()
-        elseif input.KeyCode == Enum.KeyCode.P and not State.isPlaying then
-            playRecording()
-        elseif input.KeyCode == Enum.KeyCode.Space and State.isPlaying then
-            pausePlayback()
-        elseif input.KeyCode == Enum.KeyCode.Z and UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
-            undo()
-        elseif input.KeyCode == Enum.KeyCode.Y and UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
-            redo()
-        end
+        end)
     end)
 end
 
@@ -1104,11 +1153,11 @@ updateStatus()
 updateSpeedLabel()
 updateLoopButton()
 
-print("=== Movement Recorder Pro Loaded! ===")
+print("=== Movement Recorder Pro Loaded Successfully! ===")
+print("✓ Error handling enabled")
+print("✓ Character respawn support")
 print("✓ Frame-by-frame recording at " .. CONFIG.RECORD_FPS .. " FPS")
-print("✓ Natural Humanoid:MoveTo() walking - NO TELEPORTING!")
+print("✓ Natural Humanoid:MoveTo() walking")
 print("✓ Undo/Redo with character stability")
-print("✓ Full frame editing capabilities")
-print("✓ Mobile-responsive GUI with minimize feature")
 print(State.isMobile and "Tap the floating icon to expand GUI" or "Press RIGHT SHIFT to toggle GUI")
 print("====================================")
