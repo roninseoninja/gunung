@@ -1,8 +1,8 @@
--- Movement Recorder Pro - FIXED VERSION with Error Handling
+-- Movement Recorder Pro - EXACT PATH VERSION
 -- Place this in StarterPlayer > StarterPlayerScripts or StarterGui
--- Features: Frame editing, Undo/Redo, Mobile support, Natural walking replay, Minimize to floating icon
+-- This version follows the EXACT recorded path, not pathfinding waypoints
 
-print("=== Movement Recorder x - Initializing (FIXED) ===")
+print("=== Movement Recorder Pro - EXACT PATH (FIXED) ===")
 
 -- ============================
 -- SERVICES
@@ -19,12 +19,10 @@ local TweenService = game:GetService("TweenService")
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
--- Character references (will be updated on respawn)
 local character = nil
 local humanoid = nil
 local hrp = nil
 
--- Function to setup character references
 local function setupCharacter()
     character = player.Character or player.CharacterAdded:Wait()
     humanoid = character:WaitForChild("Humanoid")
@@ -32,13 +30,11 @@ local function setupCharacter()
     print("Character setup complete")
 end
 
--- Initial setup
 setupCharacter()
 
--- Handle character respawning
 player.CharacterAdded:Connect(function(newCharacter)
     print("Character respawned, updating references...")
-    wait(0.5) -- Wait for character to fully load
+    wait(0.5)
     setupCharacter()
 end)
 
@@ -49,10 +45,12 @@ local CONFIG = {
     RECORD_FPS = 30,
     PLAYBACK_DEFAULT_SPEED = 1.0,
     MAX_UNDO_STACK = 50,
-    WAYPOINT_THRESHOLD = 2.5,
     MOBILE_BUTTON_SIZE = 60,
     PC_BUTTON_SIZE = 40,
-    FLOATING_ICON_SIZE = 50
+    FLOATING_ICON_SIZE = 50,
+    -- EXACT PATH OPTIONS
+    USE_EXACT_PATH = true, -- Follow exact recorded path
+    SMOOTH_INTERPOLATION = true, -- Smooth between frames
 }
 
 -- ============================
@@ -163,6 +161,7 @@ local function captureFrame()
             position = hrp.Position,
             cframe = hrp.CFrame,
             lookVector = hrp.CFrame.LookVector,
+            velocity = hrp.AssemblyVelocity, -- Capture velocity for exact replay
             state = currentState,
             isJumping = currentState == Enum.HumanoidStateType.Jumping or 
                        currentState == Enum.HumanoidStateType.Freefall,
@@ -210,8 +209,21 @@ local function stopRecording()
 end
 
 -- ============================
--- PLAYBACK FUNCTIONS
+-- EXACT PATH PLAYBACK FUNCTIONS
 -- ============================
+
+local function setWalkingAnimation(isWalking, speed)
+    -- Trigger walking animation by setting WalkSpeed
+    if not humanoid or not humanoid.Parent then return end
+    
+    pcall(function()
+        if isWalking then
+            humanoid.WalkSpeed = 16 * speed
+        else
+            humanoid.WalkSpeed = 0
+        end
+    end)
+end
 
 local function interpolateFrames(frame1, frame2, alpha)
     if not frame1 or not frame2 then return frame1 end
@@ -221,15 +233,16 @@ local function interpolateFrames(frame1, frame2, alpha)
             position = frame1.position:Lerp(frame2.position, alpha),
             cframe = frame1.cframe:Lerp(frame2.cframe, alpha),
             lookVector = frame1.lookVector:Lerp(frame2.lookVector, alpha),
-            isJumping = frame2.isJumping,
-            isClimbing = frame2.isClimbing
+            velocity = frame1.velocity:Lerp(frame2.velocity, alpha),
+            isJumping = alpha > 0.5 and frame2.isJumping or frame1.isJumping,
+            isClimbing = alpha > 0.5 and frame2.isClimbing or frame1.isClimbing
         }
     end)
     
     return success and result or frame1
 end
 
-local function playRecording()
+local function playRecordingExactPath()
     if State.isRecording or State.isPlaying or #State.frames == 0 then 
         print("Cannot play: no frames or already playing")
         return 
@@ -240,12 +253,12 @@ local function playRecording()
         return
     end
     
-    print("Playback started with", #State.frames, "frames")
+    print("Playback started (EXACT PATH) with", #State.frames, "frames")
     State.isPlaying = true
     State.currentFrame = 1
     
-    local moveTimeout = 0
-    local maxMoveTimeout = 3
+    -- Temporarily unanchor to allow movement but control via CFrame
+    unanchorCharacter()
     
     State.playConnection = RunService.Heartbeat:Connect(function(deltaTime)
         if not State.isPlaying or State.isPaused then return end
@@ -254,38 +267,60 @@ local function playRecording()
             return
         end
         
-        local adjustedDelta = deltaTime * State.playbackSpeed
-        State.currentFrame = State.currentFrame + (adjustedDelta * CONFIG.RECORD_FPS)
-        
-        local frameIndex = math.floor(State.currentFrame)
-        
-        if frameIndex >= #State.frames then
-            if State.loopEnabled then
-                State.currentFrame = 1
-                frameIndex = 1
-            else
-                stopPlayback()
-                return
+        pcall(function()
+            -- Progress through frames based on playback speed
+            local adjustedDelta = deltaTime * State.playbackSpeed
+            State.currentFrame = State.currentFrame + (adjustedDelta * CONFIG.RECORD_FPS)
+            
+            local frameIndex = math.floor(State.currentFrame)
+            
+            -- Loop or stop at end
+            if frameIndex >= #State.frames then
+                if State.loopEnabled then
+                    State.currentFrame = 1
+                    frameIndex = 1
+                else
+                    stopPlayback()
+                    return
+                end
             end
-        end
-        
-        local frame = State.frames[frameIndex]
-        local nextFrame = State.frames[frameIndex + 1]
-        
-        if frame then
-            pcall(function()
-                local targetPosition = frame.position
+            
+            local frame = State.frames[frameIndex]
+            local nextFrame = State.frames[frameIndex + 1]
+            
+            if frame then
+                local targetCFrame = frame.cframe
+                local targetVelocity = frame.velocity
                 
-                if nextFrame then
+                -- Smooth interpolation between frames
+                if CONFIG.SMOOTH_INTERPOLATION and nextFrame then
                     local alpha = State.currentFrame - frameIndex
                     local interpolated = interpolateFrames(frame, nextFrame, alpha)
                     if interpolated then
-                        targetPosition = interpolated.position
+                        targetCFrame = interpolated.cframe
+                        targetVelocity = interpolated.velocity
                     end
                 end
                 
-                humanoid:MoveTo(targetPosition)
+                -- EXACT PATH: Set CFrame directly to follow recorded path precisely
+                hrp.CFrame = targetCFrame
                 
+                -- Apply velocity for physics (optional, for more realism)
+                if hrp.AssemblyVelocity then
+                    hrp.AssemblyVelocity = targetVelocity * State.playbackSpeed
+                end
+                
+                -- Trigger walking animation
+                local speed = targetVelocity.Magnitude
+                if speed > 0.5 then
+                    setWalkingAnimation(true, State.playbackSpeed)
+                    -- Make humanoid think it's moving for animation
+                    humanoid:Move(targetCFrame.LookVector, true)
+                else
+                    setWalkingAnimation(false, 1)
+                end
+                
+                -- Handle jumping
                 if frame.isJumping then
                     local currentState = humanoid:GetState()
                     if currentState ~= Enum.HumanoidStateType.Jumping and 
@@ -294,22 +329,12 @@ local function playRecording()
                     end
                 end
                 
+                -- Handle climbing
                 if frame.isClimbing then
                     humanoid:ChangeState(Enum.HumanoidStateType.Climbing)
                 end
-                
-                local distanceToTarget = (targetPosition - hrp.Position).Magnitude
-                if distanceToTarget < CONFIG.WAYPOINT_THRESHOLD then
-                    moveTimeout = 0
-                else
-                    moveTimeout = moveTimeout + deltaTime
-                    if moveTimeout > maxMoveTimeout then
-                        State.currentFrame = frameIndex + 1
-                        moveTimeout = 0
-                    end
-                end
-            end)
-        end
+            end
+        end)
     end)
 end
 
@@ -322,6 +347,14 @@ local function stopPlayback()
     State.isPlaying = false
     State.isPaused = false
     State.currentFrame = 0
+    
+    -- Reset walk speed
+    pcall(function()
+        if humanoid and humanoid.Parent then
+            humanoid.WalkSpeed = 16
+        end
+    end)
+    
     print("Playback stopped")
 end
 
@@ -393,6 +426,11 @@ local function modifyFrame(frameIndex, newData)
             frame.cframe = CFrame.new(frame.position) * newData.rotation
             frame.lookVector = frame.cframe.LookVector
         end
+        
+        -- Update velocity if standing still
+        if hrp.AssemblyVelocity then
+            frame.velocity = hrp.AssemblyVelocity
+        end
     end)
     
     print("Frame modified at index", frameIndex)
@@ -441,7 +479,8 @@ local function serializeRecording()
         metadata = {
             frameCount = #State.frames,
             recordedAt = os.time(),
-            fps = CONFIG.RECORD_FPS
+            fps = CONFIG.RECORD_FPS,
+            exactPath = CONFIG.USE_EXACT_PATH
         }
     }
     
@@ -453,6 +492,7 @@ local function serializeRecording()
                 position = {frame.position.X, frame.position.Y, frame.position.Z},
                 cframe = {frame.cframe:GetComponents()},
                 lookVector = {frame.lookVector.X, frame.lookVector.Y, frame.lookVector.Z},
+                velocity = {frame.velocity.X, frame.velocity.Y, frame.velocity.Z},
                 state = tostring(frame.state),
                 isJumping = frame.isJumping,
                 isClimbing = frame.isClimbing
@@ -491,6 +531,7 @@ local function deserializeRecording(jsonData)
                 position = Vector3.new(frameData.position[1], frameData.position[2], frameData.position[3]),
                 cframe = CFrame.new(unpack(frameData.cframe)),
                 lookVector = Vector3.new(frameData.lookVector[1], frameData.lookVector[2], frameData.lookVector[3]),
+                velocity = Vector3.new(frameData.velocity[1], frameData.velocity[2], frameData.velocity[3]),
                 state = Enum.HumanoidStateType[stateString],
                 isJumping = frameData.isJumping,
                 isClimbing = frameData.isClimbing
@@ -576,10 +617,10 @@ local titleLabel = Instance.new("TextLabel")
 titleLabel.Size = UDim2.new(1, -100, 1, 0)
 titleLabel.Position = UDim2.new(0, 10, 0, 0)
 titleLabel.BackgroundTransparency = 1
-titleLabel.Text = "Movement Recorder Pro"
+titleLabel.Text = "Movement Recorder Pro - EXACT PATH"
 titleLabel.TextColor3 = Color3.fromRGB(0, 200, 255)
 titleLabel.Font = Enum.Font.GothamBold
-titleLabel.TextSize = State.isMobile and 18 or 20
+titleLabel.TextSize = State.isMobile and 16 or 18
 titleLabel.TextXAlignment = Enum.TextXAlignment.Left
 titleLabel.Parent = titleBar
 
@@ -679,7 +720,7 @@ local statusLabel = Instance.new("TextLabel")
 statusLabel.Size = UDim2.new(1, -20, 1, -10)
 statusLabel.Position = UDim2.new(0, 10, 0, 5)
 statusLabel.BackgroundTransparency = 1
-statusLabel.Text = "Status: Ready\nFrames: 0\nCurrent Frame: 0\nMode: Natural Humanoid Walking"
+statusLabel.Text = "Status: Ready\nFrames: 0\nCurrent Frame: 0\nMode: EXACT PATH (CFrame-based)"
 statusLabel.TextColor3 = Color3.fromRGB(0, 255, 200)
 statusLabel.Font = Enum.Font.Gotham
 statusLabel.TextSize = State.isMobile and 12 or 14
@@ -809,7 +850,7 @@ local infoLabel = Instance.new("TextLabel")
 infoLabel.Size = UDim2.new(1, -20, 1, -10)
 infoLabel.Position = UDim2.new(0, 10, 0, 5)
 infoLabel.BackgroundTransparency = 1
-infoLabel.Text = "✓ Natural walking (no teleport!)\n✓ Frame-by-frame editing\n✓ Undo/Redo with stability\n" .. (State.isMobile and "Tap floating icon to expand" or "Press RIGHT SHIFT to toggle")
+infoLabel.Text = "✓ EXACT PATH - Follows recorded route precisely!\n✓ Frame-by-frame editing\n✓ Walking animations maintained\n" .. (State.isMobile and "Tap floating icon to expand" or "Press RIGHT SHIFT to toggle")
 infoLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
 infoLabel.Font = Enum.Font.Gotham
 infoLabel.TextSize = State.isMobile and 10 or 12
@@ -843,7 +884,7 @@ local function updateStatus()
             math.floor(State.currentFrame), 
             #State.frames)
         
-        statusLabel.Text = string.format("Status: %s\n%s\nMode: Natural Humanoid Walking", status, frameText)
+        statusLabel.Text = string.format("Status: %s\n%s\nMode: EXACT PATH (CFrame-based)", status, frameText)
     end)
 end
 
@@ -951,7 +992,7 @@ end)
 
 playBtn.MouseButton1Click:Connect(function()
     pcall(function()
-        playRecording()
+        playRecordingExactPath()
         updateStatus()
     end)
 end)
@@ -1059,10 +1100,6 @@ UserInputService.InputChanged:Connect(function(input)
             speedButton.Position = UDim2.new(relativePos, -(speedButton.AbsoluteSize.X / 2), 0, 0)
             State.playbackSpeed = 0.25 + (relativePos * 2.75)
             updateSpeedLabel()
-            
-            if State.isPlaying and humanoid and humanoid.Parent then
-                humanoid.WalkSpeed = 16 * State.playbackSpeed
-            end
         end)
     end
 end)
@@ -1130,7 +1167,7 @@ if not State.isMobile then
             elseif input.KeyCode == Enum.KeyCode.S and State.isRecording then
                 stopRecording()
             elseif input.KeyCode == Enum.KeyCode.P and not State.isPlaying then
-                playRecording()
+                playRecordingExactPath()
             elseif input.KeyCode == Enum.KeyCode.Space and State.isPlaying then
                 pausePlayback()
             elseif input.KeyCode == Enum.KeyCode.Z and UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
@@ -1147,11 +1184,12 @@ updateStatus()
 updateSpeedLabel()
 updateLoopButton()
 
-print("=== Movement Recorder Pro Loaded Successfully! ===")
+print("=== Movement Recorder Pro Loaded (EXACT PATH MODE) ===")
 print("✓ Error handling enabled")
 print("✓ Character respawn support")
+print("✓ EXACT PATH - Uses CFrame positioning (no pathfinding!)")
+print("✓ Walking animations maintained")
 print("✓ Frame-by-frame recording at " .. CONFIG.RECORD_FPS .. " FPS")
-print("✓ Natural Humanoid:MoveTo() walking")
-print("✓ Undo/Redo with character stability")
+print("✓ Smooth interpolation between frames")
 print(State.isMobile and "Tap the floating icon to expand GUI" or "Press RIGHT SHIFT to toggle GUI")
 print("====================================")
