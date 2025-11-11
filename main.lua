@@ -1,22 +1,23 @@
 --[[
-	MOVEMENT RECORDER SYSTEM v2.0
-	A complete client-side movement tracking and replay system for Roblox
+	MOVEMENT RECORDER SYSTEM v3.0 - NATURAL WALKING
+	Combines advanced GUI with TRUE natural walking (no teleporting!)
 	Place in: StarterPlayer > StarterPlayerScripts
 	
-	Features:
-	- Continuous movement recording with state detection
-	- Editable log GUI with individual entry management
-	- Smooth replay system with speed controls
-	- Save/Load system with JSON export
-	- DRAGGABLE and minimizable GUI
-	- Modern, minimalist UI design
+	Key Features:
+	- Natural walking using Humanoid:MoveTo() - NO TELEPORTING!
+	- Draggable GUI with minimize/maximize
+	- Waypoint-based recording system
+	- Smooth replay with adjustable speed
+	- Modern, polished UI
 	
 	Controls:
 	- R: Toggle recording on/off
-	- Drag the header to move GUI
+	- RIGHT SHIFT: Toggle GUI visibility
+	- Drag header to move GUI
 	- Click minimize button to collapse to icon
-	- UI buttons for all other functions
 ]]
+
+print("=== Movement Recorder v3.0 - Natural Walking Edition ===")
 
 -- ========================================
 -- SERVICES & VARIABLES
@@ -36,49 +37,44 @@ local camera = workspace.CurrentCamera
 
 -- Recording state
 local isRecording = false
+local isPlaying = false
 local recordingStartTime = 0
 local currentRecording = {}
-local recordingConnection = nil
-local stateConnection = nil
-local lastAction = "Idle"
-local lastPosition = nil
-local recordingUpdateInterval = 0.05 -- Record every 0.05 seconds (20 times per second)
-local lastRecordTime = 0
+local recordConnection = nil
+local playConnection = nil
+local recordInterval = 0.2 -- Record waypoint every 0.2 seconds
+local timeSinceLastRecord = 0
 
--- Replay state
-local isReplaying = false
-local replayConnection = nil
-local replayPaused = false
-local replayIndex = 1
-local replaySpeed = 1
+-- Playback state
+local playbackSpeed = 1
+local currentWaypoint = 1
+local moveTimeout = 0
+local maxMoveTimeout = 5
+local originalWalkSpeed = 16
 
 -- Saved recordings
 local savedRecordings = {}
 
--- UI Elements (will be created later)
+-- UI Elements
 local mainGui = nil
 local mainFrame = nil
 local minimizedIcon = nil
 local recordingButton = nil
 local statusLabel = nil
-local entryCountLabel = nil
+local waypointCountLabel = nil
 local recordingTimeLabel = nil
 local scrollingFrame = nil
-local replayControlsFrame = nil
-local savedRecordingsFrame = nil
+local playButton = nil
+local stopButton = nil
+local pauseButton = nil
+local speedLabel = nil
 local isMinimized = false
-
--- Dragging variables
-local dragging = false
-local dragInput = nil
-local dragStart = nil
-local startPos = nil
 
 -- ========================================
 -- UTILITY FUNCTIONS
 -- ========================================
 
--- Convert timestamp to readable time format
+-- Format time as MM:SS.ms
 local function formatTime(seconds)
 	local minutes = math.floor(seconds / 60)
 	local secs = math.floor(seconds % 60)
@@ -86,221 +82,15 @@ local function formatTime(seconds)
 	return string.format("%02d:%02d.%02d", minutes, secs, ms)
 end
 
--- Round number to specified decimal places
-local function round(num, decimals)
-	local mult = 10^(decimals or 0)
-	return math.floor(num * mult + 0.5) / mult
-end
-
 -- Format Vector3 for display
 local function formatVector3(vec)
 	return string.format("%.1f, %.1f, %.1f", vec.X, vec.Y, vec.Z)
-end
-
--- Get current humanoid state as string
-local function getHumanoidAction(state)
-	local stateMap = {
-		[Enum.HumanoidStateType.Freefall] = "Falling",
-		[Enum.HumanoidStateType.Flying] = "Flying",
-		[Enum.HumanoidStateType.Jumping] = "Jumping",
-		[Enum.HumanoidStateType.Climbing] = "Climbing",
-		[Enum.HumanoidStateType.Swimming] = "Swimming",
-		[Enum.HumanoidStateType.Running] = "Running",
-		[Enum.HumanoidStateType.RunningNoPhysics] = "Running",
-		[Enum.HumanoidStateType.Landed] = "Landed",
-		[Enum.HumanoidStateType.Seated] = "Seated",
-		[Enum.HumanoidStateType.Dead] = "Dead",
-	}
-	return stateMap[state] or "Idle"
-end
-
--- ========================================
--- RECORDING FUNCTIONS
--- ========================================
-
--- Start recording player movements
-local function startRecording()
-	if isRecording then return end
-	
-	-- Safety check
-	if not humanoidRootPart or not humanoid then
-		warn("[Recorder] Character not ready!")
-		return
-	end
-	
-	isRecording = true
-	recordingStartTime = tick()
-	currentRecording = {}
-	lastAction = "Idle"
-	lastPosition = humanoidRootPart.Position
-	lastRecordTime = 0
-	
-	-- Update UI
-	if recordingButton then
-		recordingButton.Text = "⏹ Stop Recording"
-		recordingButton.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
-	end
-	if statusLabel then
-		statusLabel.Text = "🔴 RECORDING"
-		statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-	end
-	
-	-- Show recording indicator on minimized icon
-	if minimizedIcon then
-		local indicator = minimizedIcon:FindFirstChild("RecordingIndicator")
-		if indicator then
-			indicator.Visible = true
-			-- Pulse animation
-			task.spawn(function()
-				while isRecording do
-					TweenService:Create(indicator, TweenInfo.new(0.5, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
-						BackgroundColor3 = Color3.fromRGB(255, 150, 150)
-					}):Play()
-					wait(0.5)
-					TweenService:Create(indicator, TweenInfo.new(0.5, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
-						BackgroundColor3 = Color3.fromRGB(255, 50, 50)
-					}):Play()
-					wait(0.5)
-				end
-			end)
-		end
-	end
-	
-	print("[Recorder] Recording started!")
-	
-	-- Record movement data at intervals
-	recordingConnection = RunService.Heartbeat:Connect(function(deltaTime)
-		if not isRecording then return end
-		
-		-- Check if character still exists
-		if not humanoidRootPart or not humanoidRootPart.Parent then
-			warn("[Recorder] Character missing, stopping recording")
-			stopRecording()
-			return
-		end
-		
-		local currentTime = tick() - recordingStartTime
-		
-		-- Only record at specified intervals to optimize performance
-		if currentTime - lastRecordTime < recordingUpdateInterval then
-			return
-		end
-		lastRecordTime = currentTime
-		
-		local position = humanoidRootPart.Position
-		local rotation = humanoidRootPart.CFrame
-		
-		-- Determine action based on current state and movement
-		local action = lastAction
-		local moveDirection = humanoid.MoveDirection
-		
-		-- Check if moving
-		if moveDirection.Magnitude > 0.1 then
-			-- Check speed to determine if running or walking
-			local velocity = humanoidRootPart.AssemblyLinearVelocity
-			local horizontalSpeed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
-			
-			if horizontalSpeed > 18 then
-				action = "Running"
-			elseif horizontalSpeed > 1 then
-				action = "Walking"
-			else
-				action = "Idle"
-			end
-		else
-			-- Not moving, check if in special state
-			if lastAction ~= "Jumping" and lastAction ~= "Falling" and lastAction ~= "Climbing" and lastAction ~= "Swimming" then
-				action = "Idle"
-			end
-		end
-		
-		-- Store the entry
-		local entry = {
-			timestamp = currentTime,
-			position = {position.X, position.Y, position.Z},
-			action = action,
-			rotation = {rotation:GetComponents()},
-			cameraRotation = {camera.CFrame:GetComponents()}
-		}
-		
-		table.insert(currentRecording, entry)
-		lastPosition = position
-		
-		-- Debug output every 50 entries
-		if #currentRecording % 50 == 0 then
-			print("[Recorder] Recorded " .. #currentRecording .. " entries")
-		end
-	end)
-	
-	-- Track state changes (jumping, climbing, swimming, etc.)
-	stateConnection = humanoid.StateChanged:Connect(function(oldState, newState)
-		local newAction = getHumanoidAction(newState)
-		if newAction ~= "Idle" then
-			lastAction = newAction
-			print("[Recorder] State changed to: " .. newAction)
-		end
-	end)
-end
-
--- Stop recording
-local function stopRecording()
-	if not isRecording then return end
-	
-	isRecording = false
-	
-	if recordingConnection then
-		recordingConnection:Disconnect()
-		recordingConnection = nil
-	end
-	
-	if stateConnection then
-		stateConnection:Disconnect()
-		stateConnection = nil
-	end
-	
-	-- Update UI
-	if recordingButton then
-		recordingButton.Text = "⏺ Start Recording"
-		recordingButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
-	end
-	if statusLabel then
-		statusLabel.Text = "⚪ STOPPED"
-		statusLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
-	end
-	
-	-- Hide recording indicator on minimized icon
-	if minimizedIcon then
-		local indicator = minimizedIcon:FindFirstChild("RecordingIndicator")
-		if indicator then
-			indicator.Visible = false
-		end
-	end
-	
-	-- Update entry count
-	if entryCountLabel then
-		entryCountLabel.Text = "Entries: " .. #currentRecording
-	end
-	
-	-- Refresh the log display
-	task.spawn(refreshLogDisplay)
-	
-	print("[Recorder] Recording stopped - " .. #currentRecording .. " entries captured")
-end
-
--- Toggle recording on/off
-local function toggleRecording()
-	if isRecording then
-		stopRecording()
-	else
-		startRecording()
-	end
 end
 
 -- ========================================
 -- GUI DRAG FUNCTIONS
 -- ========================================
 
--- Make a frame draggable
 local function makeDraggable(frame, dragHandle)
 	local dragging = false
 	local dragInput = nil
@@ -345,13 +135,11 @@ local function makeDraggable(frame, dragHandle)
 	end)
 end
 
--- Minimize GUI to floating icon
 local function minimizeGUI()
 	if not mainFrame or not minimizedIcon then return end
 	
 	isMinimized = true
 	
-	-- Animate main frame out
 	local tweenInfo = TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In)
 	local tween = TweenService:Create(mainFrame, tweenInfo, {
 		Size = UDim2.new(0, 0, 0, 0),
@@ -363,7 +151,6 @@ local function minimizeGUI()
 		mainFrame.Visible = false
 	end)
 	
-	-- Show minimized icon
 	minimizedIcon.Visible = true
 	minimizedIcon.Size = UDim2.new(0, 0, 0, 0)
 	
@@ -373,13 +160,11 @@ local function minimizeGUI()
 	iconTween:Play()
 end
 
--- Maximize GUI from floating icon
 local function maximizeGUI()
 	if not mainFrame or not minimizedIcon then return end
 	
 	isMinimized = false
 	
-	-- Hide minimized icon
 	local iconTween = TweenService:Create(minimizedIcon, TweenInfo.new(0.2, Enum.EasingStyle.Back, Enum.EasingDirection.In), {
 		Size = UDim2.new(0, 0, 0, 0)
 	})
@@ -389,35 +174,375 @@ local function maximizeGUI()
 		minimizedIcon.Visible = false
 	end)
 	
-	-- Show main frame
 	mainFrame.Visible = true
 	mainFrame.Size = UDim2.new(0, 0, 0, 0)
 	
 	local tweenInfo = TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 	local tween = TweenService:Create(mainFrame, tweenInfo, {
-		Size = UDim2.new(0, 400, 0, 600)
+		Size = UDim2.new(0, 400, 0, 550)
 	})
 	tween:Play()
+end
+
+-- ========================================
+-- RECORDING FUNCTIONS (NATURAL WALKING)
+-- ========================================
+
+local function startRecording()
+	if isRecording or isPlaying then return end
+	
+	if not humanoidRootPart or not humanoid then
+		warn("[Recorder] Character not ready!")
+		return
+	end
+	
+	isRecording = true
+	recordingStartTime = tick()
+	currentRecording = {}
+	timeSinceLastRecord = 0
+	
+	-- Update UI
+	if recordingButton then
+		recordingButton.Text = "⏹ STOP RECORDING"
+		recordingButton.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
+	end
+	if statusLabel then
+		statusLabel.Text = "🔴 RECORDING"
+		statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+	end
+	
+	-- Show recording indicator on minimized icon
+	if minimizedIcon then
+		local indicator = minimizedIcon:FindFirstChild("RecordingIndicator")
+		if indicator then
+			indicator.Visible = true
+			-- Pulse animation
+			task.spawn(function()
+				while isRecording do
+					TweenService:Create(indicator, TweenInfo.new(0.5), {BackgroundColor3 = Color3.fromRGB(255, 150, 150)}):Play()
+					wait(0.5)
+					TweenService:Create(indicator, TweenInfo.new(0.5), {BackgroundColor3 = Color3.fromRGB(255, 50, 50)}):Play()
+					wait(0.5)
+				end
+			end)
+		end
+	end
+	
+	print("[Recorder] Recording started - Using natural waypoint system")
+	
+	-- Record waypoints at intervals
+	recordConnection = RunService.Heartbeat:Connect(function(deltaTime)
+		if not isRecording then return end
+		
+		if not humanoidRootPart or not humanoidRootPart.Parent then
+			warn("[Recorder] Character missing, stopping recording")
+			stopRecording()
+			return
+		end
+		
+		timeSinceLastRecord = timeSinceLastRecord + deltaTime
+		
+		-- Record waypoint at interval
+		if timeSinceLastRecord >= recordInterval then
+			local waypoint = {
+				Position = humanoidRootPart.Position,
+				LookVector = humanoidRootPart.CFrame.LookVector,
+				IsJumping = humanoid:GetState() == Enum.HumanoidStateType.Jumping or 
+				           humanoid:GetState() == Enum.HumanoidStateType.Freefall,
+				Timestamp = tick() - recordingStartTime
+			}
+			
+			table.insert(currentRecording, waypoint)
+			timeSinceLastRecord = 0
+			
+			-- Debug output every 10 waypoints
+			if #currentRecording % 10 == 0 then
+				print("[Recorder] Recorded " .. #currentRecording .. " waypoints")
+			end
+		end
+	end)
+end
+
+local function stopRecording()
+	if not isRecording then return end
+	
+	isRecording = false
+	
+	if recordConnection then
+		recordConnection:Disconnect()
+		recordConnection = nil
+	end
+	
+	-- Update UI
+	if recordingButton then
+		recordingButton.Text = "⏺ START RECORDING"
+		recordingButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+	end
+	if statusLabel then
+		statusLabel.Text = "⚪ STOPPED"
+		statusLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+	end
+	
+	-- Hide recording indicator
+	if minimizedIcon then
+		local indicator = minimizedIcon:FindFirstChild("RecordingIndicator")
+		if indicator then
+			indicator.Visible = false
+		end
+	end
+	
+	-- Update waypoint count
+	if waypointCountLabel then
+		waypointCountLabel.Text = "Waypoints: " .. #currentRecording
+	end
+	
+	-- Refresh display
+	task.spawn(refreshLogDisplay)
+	
+	print("[Recorder] Recording stopped - " .. #currentRecording .. " waypoints captured")
+	print("[Recorder] Method: Natural walking with Humanoid:MoveTo()")
+end
+
+local function toggleRecording()
+	if isRecording then
+		stopRecording()
+	else
+		startRecording()
+	end
+end
+
+-- ========================================
+-- REPLAY FUNCTIONS (NATURAL WALKING)
+-- ========================================
+
+local function startPlayback()
+	if isRecording or isPlaying or #currentRecording == 0 then
+		warn("[Recorder] Cannot play: recording empty or already playing")
+		return
+	end
+	
+	print("[Recorder] Starting natural walking playback with " .. #currentRecording .. " waypoints")
+	isPlaying = true
+	currentWaypoint = 1
+	moveTimeout = 0
+	originalWalkSpeed = humanoid.WalkSpeed
+	
+	-- Update UI
+	if playButton then
+		playButton.Text = "▶ PLAYING..."
+		playButton.BackgroundColor3 = Color3.fromRGB(50, 200, 50)
+	end
+	if statusLabel then
+		statusLabel.Text = "▶ PLAYING"
+		statusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+	end
+	
+	-- Apply playback speed to walk speed
+	humanoid.WalkSpeed = originalWalkSpeed * playbackSpeed
+	
+	playConnection = RunService.Heartbeat:Connect(function(deltaTime)
+		if currentWaypoint > #currentRecording then
+			print("[Recorder] Playback complete!")
+			stopPlayback()
+			return
+		end
+		
+		local waypoint = currentRecording[currentWaypoint]
+		local distanceToWaypoint = (waypoint.Position - humanoidRootPart.Position).Magnitude
+		
+		-- THIS IS THE KEY: Use MoveTo for natural walking!
+		humanoid:MoveTo(waypoint.Position)
+		
+		-- Handle jumping
+		if waypoint.IsJumping then
+			local state = humanoid:GetState()
+			if state ~= Enum.HumanoidStateType.Jumping and 
+			   state ~= Enum.HumanoidStateType.Freefall then
+				humanoid.Jump = true
+			end
+		end
+		
+		-- Check if reached waypoint
+		moveTimeout = moveTimeout + deltaTime
+		if distanceToWaypoint < 3 or moveTimeout > maxMoveTimeout then
+			currentWaypoint = currentWaypoint + 1
+			moveTimeout = 0
+			
+			-- Update progress
+			if waypointCountLabel then
+				waypointCountLabel.Text = string.format("Waypoints: %d / %d", currentWaypoint, #currentRecording)
+			end
+		end
+	end)
+end
+
+local function stopPlayback()
+	if not isPlaying then return end
+	
+	isPlaying = false
+	
+	if playConnection then
+		playConnection:Disconnect()
+		playConnection = nil
+	end
+	
+	-- Restore original walk speed
+	humanoid.WalkSpeed = originalWalkSpeed
+	
+	-- Update UI
+	if playButton then
+		playButton.Text = "▶ PLAY"
+		playButton.BackgroundColor3 = Color3.fromRGB(50, 120, 220)
+	end
+	if statusLabel then
+		statusLabel.Text = "⚪ STOPPED"
+		statusLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+	end
+	if waypointCountLabel then
+		waypointCountLabel.Text = "Waypoints: " .. #currentRecording
+	end
+	
+	print("[Recorder] Playback stopped")
+end
+
+-- ========================================
+-- LOG DISPLAY FUNCTIONS
+-- ========================================
+
+function refreshLogDisplay()
+	if not scrollingFrame then return end
+	
+	-- Clear existing entries
+	for _, child in ipairs(scrollingFrame:GetChildren()) do
+		if child:IsA("Frame") then
+			child:Destroy()
+		end
+	end
+	
+	-- Display last 30 waypoints
+	local displayCount = math.min(#currentRecording, 30)
+	local startIndex = math.max(1, #currentRecording - displayCount + 1)
+	
+	for i = startIndex, #currentRecording do
+		local waypoint = currentRecording[i]
+		createWaypointEntry(waypoint, i)
+	end
+	
+	-- Update canvas size
+	local layout = scrollingFrame:FindFirstChildOfClass("UIListLayout")
+	if layout then
+		scrollingFrame.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 10)
+	end
+	
+	scrollingFrame.CanvasPosition = Vector2.new(0, scrollingFrame.CanvasSize.Y.Offset)
+end
+
+function createWaypointEntry(waypoint, index)
+	local entryFrame = Instance.new("Frame")
+	entryFrame.Name = "Waypoint_" .. index
+	entryFrame.Size = UDim2.new(1, -10, 0, 55)
+	entryFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+	entryFrame.BorderSizePixel = 0
+	entryFrame.LayoutOrder = index
+	entryFrame.Parent = scrollingFrame
+	
+	local entryCorner = Instance.new("UICorner")
+	entryCorner.CornerRadius = UDim.new(0, 6)
+	entryCorner.Parent = entryFrame
+	
+	-- Waypoint number
+	local numberLabel = Instance.new("TextLabel")
+	numberLabel.Size = UDim2.new(0, 50, 0, 15)
+	numberLabel.Position = UDim2.new(0, 8, 0, 5)
+	numberLabel.BackgroundTransparency = 1
+	numberLabel.Text = "#" .. index
+	numberLabel.Font = Enum.Font.GothamBold
+	numberLabel.TextSize = 11
+	numberLabel.TextColor3 = Color3.fromRGB(150, 200, 255)
+	numberLabel.TextXAlignment = Enum.TextXAlignment.Left
+	numberLabel.Parent = entryFrame
+	
+	-- Time label
+	local timeLabel = Instance.new("TextLabel")
+	timeLabel.Size = UDim2.new(0, 70, 0, 15)
+	timeLabel.Position = UDim2.new(0, 60, 0, 5)
+	timeLabel.BackgroundTransparency = 1
+	timeLabel.Text = formatTime(waypoint.Timestamp)
+	timeLabel.Font = Enum.Font.Gotham
+	timeLabel.TextSize = 10
+	timeLabel.TextColor3 = Color3.fromRGB(180, 180, 190)
+	timeLabel.TextXAlignment = Enum.TextXAlignment.Left
+	timeLabel.Parent = entryFrame
+	
+	-- Jump indicator
+	if waypoint.IsJumping then
+		local jumpLabel = Instance.new("TextLabel")
+		jumpLabel.Size = UDim2.new(0, 50, 0, 15)
+		jumpLabel.Position = UDim2.new(1, -58, 0, 5)
+		jumpLabel.BackgroundColor3 = Color3.fromRGB(255, 200, 50)
+		jumpLabel.Text = "JUMP"
+		jumpLabel.Font = Enum.Font.GothamBold
+		jumpLabel.TextSize = 9
+		jumpLabel.TextColor3 = Color3.fromRGB(50, 50, 50)
+		jumpLabel.Parent = entryFrame
+		
+		local jumpCorner = Instance.new("UICorner")
+		jumpCorner.CornerRadius = UDim.new(0, 4)
+		jumpCorner.Parent = jumpLabel
+	end
+	
+	-- Position label
+	local posLabel = Instance.new("TextLabel")
+	posLabel.Size = UDim2.new(1, -16, 0, 15)
+	posLabel.Position = UDim2.new(0, 8, 0, 25)
+	posLabel.BackgroundTransparency = 1
+	posLabel.Text = "Pos: " .. formatVector3(waypoint.Position)
+	posLabel.Font = Enum.Font.Gotham
+	posLabel.TextSize = 10
+	posLabel.TextColor3 = Color3.fromRGB(180, 180, 190)
+	posLabel.TextXAlignment = Enum.TextXAlignment.Left
+	posLabel.Parent = entryFrame
+	
+	-- Delete button
+	local deleteButton = Instance.new("TextButton")
+	deleteButton.Size = UDim2.new(0, 50, 0, 18)
+	deleteButton.Position = UDim2.new(0, 8, 1, -23)
+	deleteButton.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+	deleteButton.Text = "Delete"
+	deleteButton.Font = Enum.Font.Gotham
+	deleteButton.TextSize = 9
+	deleteButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+	deleteButton.Parent = entryFrame
+	
+	local delCorner = Instance.new("UICorner")
+	delCorner.CornerRadius = UDim.new(0, 4)
+	delCorner.Parent = deleteButton
+	
+	deleteButton.MouseButton1Click:Connect(function()
+		table.remove(currentRecording, index)
+		refreshLogDisplay()
+		if waypointCountLabel then
+			waypointCountLabel.Text = "Waypoints: " .. #currentRecording
+		end
+	end)
 end
 
 -- ========================================
 -- GUI CREATION
 -- ========================================
 
--- Create the main UI
 local function createUI()
-	-- Main ScreenGui
 	mainGui = Instance.new("ScreenGui")
 	mainGui.Name = "MovementRecorderGUI"
 	mainGui.ResetOnSpawn = false
 	mainGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	mainGui.Parent = player.PlayerGui
 	
-	-- Main Frame (collapsible panel)
+	-- Main Frame
 	mainFrame = Instance.new("Frame")
 	mainFrame.Name = "MainFrame"
-	mainFrame.Size = UDim2.new(0, 400, 0, 600)
-	mainFrame.Position = UDim2.new(0.5, -200, 0.5, -300) -- Centered by default
+	mainFrame.Size = UDim2.new(0, 400, 0, 550)
+	mainFrame.Position = UDim2.new(0.5, -200, 0.5, -275)
 	mainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
 	mainFrame.BorderSizePixel = 0
 	mainFrame.Parent = mainGui
@@ -427,7 +552,7 @@ local function createUI()
 	mainCorner.Parent = mainFrame
 	
 	local mainStroke = Instance.new("UIStroke")
-	mainStroke.Color = Color3.fromRGB(60, 60, 70)
+	mainStroke.Color = Color3.fromRGB(0, 255, 127)
 	mainStroke.Thickness = 2
 	mainStroke.Parent = mainFrame
 	
@@ -443,23 +568,21 @@ local function createUI()
 	headerCorner.CornerRadius = UDim.new(0, 12)
 	headerCorner.Parent = header
 	
-	-- Make draggable
 	makeDraggable(mainFrame, header)
 	
 	local titleLabel = Instance.new("TextLabel")
 	titleLabel.Size = UDim2.new(1, -100, 1, 0)
 	titleLabel.Position = UDim2.new(0, 10, 0, 0)
 	titleLabel.BackgroundTransparency = 1
-	titleLabel.Text = "🎬 Movement Recorder"
+	titleLabel.Text = "🚶 Natural Walk Recorder"
 	titleLabel.Font = Enum.Font.GothamBold
 	titleLabel.TextSize = 18
-	titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+	titleLabel.TextColor3 = Color3.fromRGB(0, 255, 127)
 	titleLabel.TextXAlignment = Enum.TextXAlignment.Left
 	titleLabel.Parent = header
 	
 	-- Minimize Button
 	local minimizeButton = Instance.new("TextButton")
-	minimizeButton.Name = "MinimizeButton"
 	minimizeButton.Size = UDim2.new(0, 35, 0, 35)
 	minimizeButton.Position = UDim2.new(1, -45, 0, 7.5)
 	minimizeButton.BackgroundColor3 = Color3.fromRGB(80, 80, 90)
@@ -475,7 +598,6 @@ local function createUI()
 	
 	minimizeButton.MouseButton1Click:Connect(minimizeGUI)
 	
-	-- Hover effect for minimize button
 	minimizeButton.MouseEnter:Connect(function()
 		minimizeButton.BackgroundColor3 = Color3.fromRGB(100, 100, 110)
 	end)
@@ -488,7 +610,7 @@ local function createUI()
 	minimizedIcon.Name = "MinimizedIcon"
 	minimizedIcon.Size = UDim2.new(0, 60, 0, 60)
 	minimizedIcon.Position = UDim2.new(1, -80, 0, 20)
-	minimizedIcon.BackgroundColor3 = Color3.fromRGB(50, 120, 220)
+	minimizedIcon.BackgroundColor3 = Color3.fromRGB(0, 200, 100)
 	minimizedIcon.BorderSizePixel = 0
 	minimizedIcon.Visible = false
 	minimizedIcon.Parent = mainGui
@@ -498,25 +620,22 @@ local function createUI()
 	iconCorner.Parent = minimizedIcon
 	
 	local iconStroke = Instance.new("UIStroke")
-	iconStroke.Color = Color3.fromRGB(100, 160, 255)
+	iconStroke.Color = Color3.fromRGB(0, 255, 127)
 	iconStroke.Thickness = 3
 	iconStroke.Parent = minimizedIcon
 	
 	local iconLabel = Instance.new("TextLabel")
 	iconLabel.Size = UDim2.new(1, 0, 1, 0)
 	iconLabel.BackgroundTransparency = 1
-	iconLabel.Text = "🎬"
+	iconLabel.Text = "🚶"
 	iconLabel.Font = Enum.Font.GothamBold
 	iconLabel.TextSize = 30
 	iconLabel.Parent = minimizedIcon
 	
-	-- Make minimized icon draggable too
 	makeDraggable(minimizedIcon, minimizedIcon)
-	
-	-- Click to maximize
 	minimizedIcon.MouseButton1Click:Connect(maximizeGUI)
 	
-	-- Recording indicator on minimized icon
+	-- Recording indicator on icon
 	local recordingIndicator = Instance.new("Frame")
 	recordingIndicator.Name = "RecordingIndicator"
 	recordingIndicator.Size = UDim2.new(0, 16, 0, 16)
@@ -536,7 +655,7 @@ local function createUI()
 	statusLabel.Size = UDim2.new(0, 120, 0, 30)
 	statusLabel.Position = UDim2.new(1, -130, 0, 10)
 	statusLabel.BackgroundColor3 = Color3.fromRGB(45, 45, 52)
-	statusLabel.Text = "⚪ STOPPED"
+	statusLabel.Text = "⚪ READY"
 	statusLabel.Font = Enum.Font.GothamBold
 	statusLabel.TextSize = 12
 	statusLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
@@ -546,94 +665,110 @@ local function createUI()
 	statusCorner.CornerRadius = UDim.new(0, 8)
 	statusCorner.Parent = statusLabel
 	
-	-- Recording Controls Section
-	local controlsFrame = Instance.new("Frame")
-	controlsFrame.Name = "ControlsFrame"
-	controlsFrame.Size = UDim2.new(1, -20, 0, 100)
-	controlsFrame.Position = UDim2.new(0, 10, 0, 60)
-	controlsFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
-	controlsFrame.BorderSizePixel = 0
-	controlsFrame.Parent = mainFrame
+	-- Info Box
+	local infoBox = Instance.new("Frame")
+	infoBox.Size = UDim2.new(1, -20, 0, 70)
+	infoBox.Position = UDim2.new(0, 10, 0, 60)
+	infoBox.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
+	infoBox.BorderSizePixel = 0
+	infoBox.Parent = mainFrame
 	
-	local controlsCorner = Instance.new("UICorner")
-	controlsCorner.CornerRadius = UDim.new(0, 10)
-	controlsCorner.Parent = controlsFrame
+	local infoCorner = Instance.new("UICorner")
+	infoCorner.CornerRadius = UDim.new(0, 10)
+	infoCorner.Parent = infoBox
+	
+	local infoLabel = Instance.new("TextLabel")
+	infoLabel.Size = UDim2.new(1, -20, 1, -20)
+	infoLabel.Position = UDim2.new(0, 10, 0, 10)
+	infoLabel.BackgroundTransparency = 1
+	infoLabel.Text = "✓ Natural walking - NO teleporting!\n✓ Character walks to waypoints\n✓ Feet animate properly"
+	infoLabel.Font = Enum.Font.Gotham
+	infoLabel.TextSize = 12
+	infoLabel.TextColor3 = Color3.fromRGB(180, 180, 190)
+	infoLabel.TextYAlignment = Enum.TextYAlignment.Top
+	infoLabel.TextXAlignment = Enum.TextXAlignment.Left
+	infoLabel.Parent = infoBox
 	
 	-- Recording Button
 	recordingButton = Instance.new("TextButton")
-	recordingButton.Name = "RecordButton"
 	recordingButton.Size = UDim2.new(1, -20, 0, 40)
-	recordingButton.Position = UDim2.new(0, 10, 0, 10)
+	recordingButton.Position = UDim2.new(0, 10, 0, 140)
 	recordingButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
-	recordingButton.Text = "⏺ Start Recording"
+	recordingButton.Text = "⏺ START RECORDING"
 	recordingButton.Font = Enum.Font.GothamBold
 	recordingButton.TextSize = 14
 	recordingButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-	recordingButton.Parent = controlsFrame
+	recordingButton.Parent = mainFrame
 	
-	local recButtonCorner = Instance.new("UICorner")
-	recButtonCorner.CornerRadius = UDim.new(0, 8)
-	recButtonCorner.Parent = recordingButton
+	local recCorner = Instance.new("UICorner")
+	recCorner.CornerRadius = UDim.new(0, 8)
+	recCorner.Parent = recordingButton
+	
+	recordingButton.MouseButton1Click:Connect(toggleRecording)
 	
 	-- Info Labels
-	entryCountLabel = Instance.new("TextLabel")
-	entryCountLabel.Size = UDim2.new(0.5, -15, 0, 30)
-	entryCountLabel.Position = UDim2.new(0, 10, 0, 60)
-	entryCountLabel.BackgroundTransparency = 1
-	entryCountLabel.Text = "Entries: 0"
-	entryCountLabel.Font = Enum.Font.Gotham
-	entryCountLabel.TextSize = 12
-	entryCountLabel.TextColor3 = Color3.fromRGB(180, 180, 190)
-	entryCountLabel.TextXAlignment = Enum.TextXAlignment.Left
-	entryCountLabel.Parent = controlsFrame
+	waypointCountLabel = Instance.new("TextLabel")
+	waypointCountLabel.Size = UDim2.new(0.5, -15, 0, 25)
+	waypointCountLabel.Position = UDim2.new(0, 10, 0, 190)
+	waypointCountLabel.BackgroundTransparency = 1
+	waypointCountLabel.Text = "Waypoints: 0"
+	waypointCountLabel.Font = Enum.Font.Gotham
+	waypointCountLabel.TextSize = 12
+	waypointCountLabel.TextColor3 = Color3.fromRGB(180, 180, 190)
+	waypointCountLabel.TextXAlignment = Enum.TextXAlignment.Left
+	waypointCountLabel.Parent = mainFrame
 	
 	recordingTimeLabel = Instance.new("TextLabel")
-	recordingTimeLabel.Size = UDim2.new(0.5, -15, 0, 30)
-	recordingTimeLabel.Position = UDim2.new(0.5, 5, 0, 60)
+	recordingTimeLabel.Size = UDim2.new(0.5, -15, 0, 25)
+	recordingTimeLabel.Position = UDim2.new(0.5, 5, 0, 190)
 	recordingTimeLabel.BackgroundTransparency = 1
 	recordingTimeLabel.Text = "Time: 00:00.00"
 	recordingTimeLabel.Font = Enum.Font.Gotham
 	recordingTimeLabel.TextSize = 12
 	recordingTimeLabel.TextColor3 = Color3.fromRGB(180, 180, 190)
 	recordingTimeLabel.TextXAlignment = Enum.TextXAlignment.Right
-	recordingTimeLabel.Parent = controlsFrame
+	recordingTimeLabel.Parent = mainFrame
 	
-	-- Log Section Header
+	-- Log Section
 	local logHeader = Instance.new("TextLabel")
-	logHeader.Size = UDim2.new(1, -20, 0, 30)
-	logHeader.Position = UDim2.new(0, 10, 0, 170)
+	logHeader.Size = UDim2.new(1, -100, 0, 30)
+	logHeader.Position = UDim2.new(0, 10, 0, 220)
 	logHeader.BackgroundTransparency = 1
-	logHeader.Text = "📋 Recording Log"
+	logHeader.Text = "📋 Waypoint Log"
 	logHeader.Font = Enum.Font.GothamBold
 	logHeader.TextSize = 14
-	logHeader.TextColor3 = Color3.fromRGB(255, 255, 255)
+	logHeader.TextColor3 = Color3.fromRGB(0, 255, 127)
 	logHeader.TextXAlignment = Enum.TextXAlignment.Left
 	logHeader.Parent = mainFrame
 	
-	-- Clear All Button
-	local clearAllButton = Instance.new("TextButton")
-	clearAllButton.Size = UDim2.new(0, 80, 0, 25)
-	clearAllButton.Position = UDim2.new(1, -100, 0, 172)
-	clearAllButton.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
-	clearAllButton.Text = "Clear All"
-	clearAllButton.Font = Enum.Font.Gotham
-	clearAllButton.TextSize = 11
-	clearAllButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-	clearAllButton.Parent = mainFrame
+	local clearButton = Instance.new("TextButton")
+	clearButton.Size = UDim2.new(0, 80, 0, 25)
+	clearButton.Position = UDim2.new(1, -100, 0, 222)
+	clearButton.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+	clearButton.Text = "Clear All"
+	clearButton.Font = Enum.Font.Gotham
+	clearButton.TextSize = 11
+	clearButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+	clearButton.Parent = mainFrame
 	
 	local clearCorner = Instance.new("UICorner")
 	clearCorner.CornerRadius = UDim.new(0, 6)
-	clearCorner.Parent = clearAllButton
+	clearCorner.Parent = clearButton
 	
-	-- ScrollingFrame for log entries
+	clearButton.MouseButton1Click:Connect(function()
+		currentRecording = {}
+		refreshLogDisplay()
+		waypointCountLabel.Text = "Waypoints: 0"
+	end)
+	
+	-- ScrollingFrame
 	scrollingFrame = Instance.new("ScrollingFrame")
-	scrollingFrame.Name = "LogScrollFrame"
-	scrollingFrame.Size = UDim2.new(1, -20, 0, 200)
-	scrollingFrame.Position = UDim2.new(0, 10, 0, 205)
+	scrollingFrame.Size = UDim2.new(1, -20, 0, 150)
+	scrollingFrame.Position = UDim2.new(0, 10, 0, 255)
 	scrollingFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 36)
 	scrollingFrame.BorderSizePixel = 0
 	scrollingFrame.ScrollBarThickness = 6
-	scrollingFrame.ScrollBarImageColor3 = Color3.fromRGB(80, 80, 90)
+	scrollingFrame.ScrollBarImageColor3 = Color3.fromRGB(0, 255, 127)
 	scrollingFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
 	scrollingFrame.Parent = mainFrame
 	
@@ -646,99 +781,82 @@ local function createUI()
 	scrollLayout.Padding = UDim.new(0, 5)
 	scrollLayout.Parent = scrollingFrame
 	
-	-- Replay Controls Section
-	replayControlsFrame = Instance.new("Frame")
-	replayControlsFrame.Name = "ReplayFrame"
-	replayControlsFrame.Size = UDim2.new(1, -20, 0, 140)
-	replayControlsFrame.Position = UDim2.new(0, 10, 0, 415)
-	replayControlsFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
-	replayControlsFrame.BorderSizePixel = 0
-	replayControlsFrame.Parent = mainFrame
+	-- Replay Controls
+	local replayFrame = Instance.new("Frame")
+	replayFrame.Size = UDim2.new(1, -20, 0, 110)
+	replayFrame.Position = UDim2.new(0, 10, 0, 415)
+	replayFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
+	replayFrame.BorderSizePixel = 0
+	replayFrame.Parent = mainFrame
 	
 	local replayCorner = Instance.new("UICorner")
 	replayCorner.CornerRadius = UDim.new(0, 10)
-	replayCorner.Parent = replayControlsFrame
+	replayCorner.Parent = replayFrame
 	
 	local replayTitle = Instance.new("TextLabel")
 	replayTitle.Size = UDim2.new(1, -20, 0, 25)
 	replayTitle.Position = UDim2.new(0, 10, 0, 5)
 	replayTitle.BackgroundTransparency = 1
-	replayTitle.Text = "▶️ Replay Controls"
+	replayTitle.Text = "▶️ Playback Controls"
 	replayTitle.Font = Enum.Font.GothamBold
 	replayTitle.TextSize = 13
-	replayTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+	replayTitle.TextColor3 = Color3.fromRGB(0, 255, 127)
 	replayTitle.TextXAlignment = Enum.TextXAlignment.Left
-	replayTitle.Parent = replayControlsFrame
+	replayTitle.Parent = replayFrame
 	
 	-- Play Button
-	local playButton = Instance.new("TextButton")
-	playButton.Name = "PlayButton"
-	playButton.Size = UDim2.new(0.32, -5, 0, 35)
+	playButton = Instance.new("TextButton")
+	playButton.Size = UDim2.new(0.48, -5, 0, 35)
 	playButton.Position = UDim2.new(0, 10, 0, 35)
 	playButton.BackgroundColor3 = Color3.fromRGB(50, 120, 220)
-	playButton.Text = "▶ Play"
+	playButton.Text = "▶ PLAY"
 	playButton.Font = Enum.Font.GothamBold
 	playButton.TextSize = 13
 	playButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-	playButton.Parent = replayControlsFrame
+	playButton.Parent = replayFrame
 	
 	local playCorner = Instance.new("UICorner")
 	playCorner.CornerRadius = UDim.new(0, 7)
 	playCorner.Parent = playButton
 	
-	-- Pause Button
-	local pauseButton = Instance.new("TextButton")
-	pauseButton.Name = "PauseButton"
-	pauseButton.Size = UDim2.new(0.32, -5, 0, 35)
-	pauseButton.Position = UDim2.new(0.34, 0, 0, 35)
-	pauseButton.BackgroundColor3 = Color3.fromRGB(220, 150, 50)
-	pauseButton.Text = "⏸ Pause"
-	pauseButton.Font = Enum.Font.GothamBold
-	pauseButton.TextSize = 13
-	pauseButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-	pauseButton.Parent = replayControlsFrame
-	
-	local pauseCorner = Instance.new("UICorner")
-	pauseCorner.CornerRadius = UDim.new(0, 7)
-	pauseCorner.Parent = pauseButton
+	playButton.MouseButton1Click:Connect(startPlayback)
 	
 	-- Stop Button
-	local stopButton = Instance.new("TextButton")
-	stopButton.Name = "StopButton"
-	stopButton.Size = UDim2.new(0.32, -5, 0, 35)
-	stopButton.Position = UDim2.new(0.68, 0, 0, 35)
+	stopButton = Instance.new("TextButton")
+	stopButton.Size = UDim2.new(0.48, -5, 0, 35)
+	stopButton.Position = UDim2.new(0.52, 0, 0, 35)
 	stopButton.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
-	stopButton.Text = "⏹ Stop"
+	stopButton.Text = "⏹ STOP"
 	stopButton.Font = Enum.Font.GothamBold
 	stopButton.TextSize = 13
 	stopButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-	stopButton.Parent = replayControlsFrame
+	stopButton.Parent = replayFrame
 	
 	local stopCorner = Instance.new("UICorner")
 	stopCorner.CornerRadius = UDim.new(0, 7)
 	stopCorner.Parent = stopButton
 	
+	stopButton.MouseButton1Click:Connect(stopPlayback)
+	
 	-- Speed Label
-	local speedLabel = Instance.new("TextLabel")
-	speedLabel.Name = "SpeedLabel"
-	speedLabel.Size = UDim2.new(1, -20, 0, 20)
-	speedLabel.Position = UDim2.new(0, 10, 0, 80)
+	speedLabel = Instance.new("TextLabel")
+	speedLabel.Size = UDim2.new(1, -20, 0, 15)
+	speedLabel.Position = UDim2.new(0, 10, 0, 75)
 	speedLabel.BackgroundTransparency = 1
-	speedLabel.Text = "Speed: 1.00x"
+	speedLabel.Text = "Speed: 1.0x"
 	speedLabel.Font = Enum.Font.Gotham
 	speedLabel.TextSize = 11
 	speedLabel.TextColor3 = Color3.fromRGB(180, 180, 190)
 	speedLabel.TextXAlignment = Enum.TextXAlignment.Left
-	speedLabel.Parent = replayControlsFrame
+	speedLabel.Parent = replayFrame
 	
 	-- Speed Slider
 	local speedSlider = Instance.new("Frame")
-	speedSlider.Name = "SpeedSlider"
 	speedSlider.Size = UDim2.new(1, -20, 0, 20)
-	speedSlider.Position = UDim2.new(0, 10, 0, 105)
+	speedSlider.Position = UDim2.new(0, 10, 1, -25)
 	speedSlider.BackgroundColor3 = Color3.fromRGB(50, 50, 58)
 	speedSlider.BorderSizePixel = 0
-	speedSlider.Parent = replayControlsFrame
+	speedSlider.Parent = replayFrame
 	
 	local sliderCorner = Instance.new("UICorner")
 	sliderCorner.CornerRadius = UDim.new(0, 10)
@@ -746,8 +864,8 @@ local function createUI()
 	
 	local speedFill = Instance.new("Frame")
 	speedFill.Name = "Fill"
-	speedFill.Size = UDim2.new(0.36, 0, 1, 0) -- 0.36 = (1.0 - 0.25) / (3.0 - 0.25)
-	speedFill.BackgroundColor3 = Color3.fromRGB(100, 150, 255)
+	speedFill.Size = UDim2.new(0.33, 0, 1, 0)
+	speedFill.BackgroundColor3 = Color3.fromRGB(0, 255, 127)
 	speedFill.BorderSizePixel = 0
 	speedFill.Parent = speedSlider
 	
@@ -755,110 +873,12 @@ local function createUI()
 	fillCorner.CornerRadius = UDim.new(0, 10)
 	fillCorner.Parent = speedFill
 	
-	-- Save/Load Section (bottom)
-	savedRecordingsFrame = Instance.new("ScrollingFrame")
-	savedRecordingsFrame.Name = "SavedRecordingsFrame"
-	savedRecordingsFrame.Size = UDim2.new(1, -20, 0, 0)
-	savedRecordingsFrame.Position = UDim2.new(0, 10, 1, -10)
-	savedRecordingsFrame.AnchorPoint = Vector2.new(0, 1)
-	savedRecordingsFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
-	savedRecordingsFrame.BorderSizePixel = 0
-	savedRecordingsFrame.ScrollBarThickness = 4
-	savedRecordingsFrame.Visible = false
-	savedRecordingsFrame.Parent = mainFrame
-	
-	-- Save/Load Button (toggle)
-	local saveLoadToggle = Instance.new("TextButton")
-	saveLoadToggle.Size = UDim2.new(0, 120, 0, 30)
-	saveLoadToggle.Position = UDim2.new(0, 10, 1, -40)
-	saveLoadToggle.AnchorPoint = Vector2.new(0, 1)
-	saveLoadToggle.BackgroundColor3 = Color3.fromRGB(100, 70, 180)
-	saveLoadToggle.Text = "💾 Save/Load"
-	saveLoadToggle.Font = Enum.Font.GothamBold
-	saveLoadToggle.TextSize = 12
-	saveLoadToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
-	saveLoadToggle.Parent = mainFrame
-	
-	local saveCorner = Instance.new("UICorner")
-	saveCorner.CornerRadius = UDim.new(0, 8)
-	saveCorner.Parent = saveLoadToggle
-	
-	-- Export Button
-	local exportButton = Instance.new("TextButton")
-	exportButton.Size = UDim2.new(0, 120, 0, 30)
-	exportButton.Position = UDim2.new(0, 140, 1, -40)
-	exportButton.AnchorPoint = Vector2.new(0, 1)
-	exportButton.BackgroundColor3 = Color3.fromRGB(70, 140, 180)
-	exportButton.Text = "📤 Export JSON"
-	exportButton.Font = Enum.Font.GothamBold
-	exportButton.TextSize = 12
-	exportButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-	exportButton.Parent = mainFrame
-	
-	local exportCorner = Instance.new("UICorner")
-	exportCorner.CornerRadius = UDim.new(0, 8)
-	exportCorner.Parent = exportButton
-	
-	-- Import Button
-	local importButton = Instance.new("TextButton")
-	importButton.Size = UDim2.new(0, 120, 0, 30)
-	importButton.Position = UDim2.new(0, 270, 1, -40)
-	importButton.AnchorPoint = Vector2.new(0, 1)
-	importButton.BackgroundColor3 = Color3.fromRGB(180, 140, 70)
-	importButton.Text = "📥 Import JSON"
-	importButton.Font = Enum.Font.GothamBold
-	importButton.TextSize = 12
-	importButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-	importButton.Parent = mainFrame
-	
-	local importCorner = Instance.new("UICorner")
-	importCorner.CornerRadius = UDim.new(0, 8)
-	importCorner.Parent = importButton
-	
-	-- ========================================
-	-- BUTTON CONNECTIONS
-	-- ========================================
-	
-	-- Recording button
-	recordingButton.MouseButton1Click:Connect(toggleRecording)
-	
-	-- Clear all button
-	clearAllButton.MouseButton1Click:Connect(function()
-		currentRecording = {}
-		refreshLogDisplay()
-		entryCountLabel.Text = "Entries: 0"
-		print("[Recorder] All entries cleared")
-	end)
-	
-	-- Play button
-	playButton.MouseButton1Click:Connect(function()
-		if #currentRecording == 0 then
-			warn("[Recorder] No recording to replay")
-			return
-		end
-		startReplay()
-	end)
-	
-	-- Pause button
-	pauseButton.MouseButton1Click:Connect(function()
-		if isReplaying then
-			replayPaused = not replayPaused
-			pauseButton.Text = replayPaused and "▶ Resume" or "⏸ Pause"
-		end
-	end)
-	
-	-- Stop button
-	stopButton.MouseButton1Click:Connect(function()
-		stopReplay()
-	end)
-	
 	-- Speed slider interaction
 	local draggingSlider = false
 	
 	speedSlider.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
 			draggingSlider = true
-			updateSpeedSlider(input.Position.X)
 		end
 	end)
 	
@@ -868,392 +888,41 @@ local function createUI()
 		end
 	end)
 	
+	local function updateSpeedSlider(mouseX)
+		local sliderPos = speedSlider.AbsolutePosition.X
+		local sliderSize = speedSlider.AbsoluteSize.X
+		local relativeX = math.clamp((mouseX - sliderPos) / sliderSize, 0, 1)
+		
+		playbackSpeed = 0.5 + (relativeX * 2)
+		speedFill.Size = UDim2.new(relativeX, 0, 1, 0)
+		speedLabel.Text = string.format("Speed: %.1fx", playbackSpeed)
+		
+		if isPlaying then
+			humanoid.WalkSpeed = originalWalkSpeed * playbackSpeed
+		end
+	end
+	
 	UserInputService.InputChanged:Connect(function(input)
 		if draggingSlider and input.UserInputType == Enum.UserInputType.MouseMovement then
 			updateSpeedSlider(input.Position.X)
 		end
 	end)
 	
-	-- Speed slider update function
-	function updateSpeedSlider(mouseX)
-		local sliderPos = speedSlider.AbsolutePosition.X
-		local sliderSize = speedSlider.AbsoluteSize.X
-		local relativeX = math.clamp((mouseX - sliderPos) / sliderSize, 0, 1)
-		
-		-- Map to speed range 0.25x to 3x
-		replaySpeed = 0.25 + (relativeX * 2.75)
-		speedFill.Size = UDim2.new(relativeX, 0, 1, 0)
-		speedLabel.Text = string.format("Speed: %.2fx", replaySpeed)
-	end
-	
-	-- Export button
-	exportButton.MouseButton1Click:Connect(function()
-		exportRecording()
-	end)
-	
-	-- Import button
-	importButton.MouseButton1Click:Connect(function()
-		importRecording()
-	end)
-	
-	-- Save/Load toggle
-	saveLoadToggle.MouseButton1Click:Connect(function()
-		savedRecordingsFrame.Visible = not savedRecordingsFrame.Visible
-		if savedRecordingsFrame.Visible then
-			savedRecordingsFrame:TweenSize(UDim2.new(1, -20, 0, 150), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.3, true)
-		else
-			savedRecordingsFrame:TweenSize(UDim2.new(1, -20, 0, 0), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.3, true)
-		end
+	speedSlider.MouseButton1Down:Connect(function()
+		updateSpeedSlider(UserInputService:GetMouseLocation().X)
 	end)
 	
 	print("[Recorder] UI Created Successfully")
 end
 
 -- ========================================
--- LOG DISPLAY FUNCTIONS
--- ========================================
-
--- Refresh the log display
-function refreshLogDisplay()
-	-- Clear existing entries
-	for _, child in ipairs(scrollingFrame:GetChildren()) do
-		if child:IsA("Frame") then
-			child:Destroy()
-		end
-	end
-	
-	-- Display last 50 entries (performance optimization)
-	local displayCount = math.min(#currentRecording, 50)
-	local startIndex = math.max(1, #currentRecording - displayCount + 1)
-	
-	for i = startIndex, #currentRecording do
-		local entry = currentRecording[i]
-		createLogEntry(entry, i)
-	end
-	
-	-- Update canvas size
-	local layout = scrollingFrame:FindFirstChildOfClass("UIListLayout")
-	if layout then
-		scrollingFrame.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 10)
-	end
-	
-	-- Scroll to bottom
-	scrollingFrame.CanvasPosition = Vector2.new(0, scrollingFrame.CanvasSize.Y.Offset)
-end
-
--- Create a single log entry UI element
-function createLogEntry(entry, index)
-	local entryFrame = Instance.new("Frame")
-	entryFrame.Name = "Entry_" .. index
-	entryFrame.Size = UDim2.new(1, -10, 0, 60)
-	entryFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
-	entryFrame.BorderSizePixel = 0
-	entryFrame.LayoutOrder = index
-	entryFrame.Parent = scrollingFrame
-	
-	local entryCorner = Instance.new("UICorner")
-	entryCorner.CornerRadius = UDim.new(0, 6)
-	entryCorner.Parent = entryFrame
-	
-	-- Time label
-	local timeLabel = Instance.new("TextLabel")
-	timeLabel.Size = UDim2.new(0, 70, 0, 15)
-	timeLabel.Position = UDim2.new(0, 8, 0, 5)
-	timeLabel.BackgroundTransparency = 1
-	timeLabel.Text = formatTime(entry.timestamp)
-	timeLabel.Font = Enum.Font.GothamMedium
-	timeLabel.TextSize = 11
-	timeLabel.TextColor3 = Color3.fromRGB(150, 200, 255)
-	timeLabel.TextXAlignment = Enum.TextXAlignment.Left
-	timeLabel.Parent = entryFrame
-	
-	-- Action label
-	local actionLabel = Instance.new("TextLabel")
-	actionLabel.Size = UDim2.new(0, 70, 0, 15)
-	actionLabel.Position = UDim2.new(1, -78, 0, 5)
-	actionLabel.BackgroundColor3 = Color3.fromRGB(60, 100, 180)
-	actionLabel.Text = entry.action
-	actionLabel.Font = Enum.Font.GothamBold
-	actionLabel.TextSize = 10
-	actionLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-	actionLabel.Parent = entryFrame
-	
-	local actionCorner = Instance.new("UICorner")
-	actionCorner.CornerRadius = UDim.new(0, 4)
-	actionCorner.Parent = actionLabel
-	
-	-- Position label
-	local posLabel = Instance.new("TextLabel")
-	posLabel.Size = UDim2.new(1, -16, 0, 15)
-	posLabel.Position = UDim2.new(0, 8, 0, 25)
-	posLabel.BackgroundTransparency = 1
-	posLabel.Text = "Pos: " .. formatVector3(Vector3.new(entry.position[1], entry.position[2], entry.position[3]))
-	posLabel.Font = Enum.Font.Gotham
-	posLabel.TextSize = 10
-	posLabel.TextColor3 = Color3.fromRGB(180, 180, 190)
-	posLabel.TextXAlignment = Enum.TextXAlignment.Left
-	posLabel.TextTruncate = Enum.TextTruncate.AtEnd
-	posLabel.Parent = entryFrame
-	
-	-- Delete button
-	local deleteButton = Instance.new("TextButton")
-	deleteButton.Size = UDim2.new(0, 60, 0, 20)
-	deleteButton.Position = UDim2.new(0, 8, 1, -25)
-	deleteButton.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
-	deleteButton.Text = "Delete"
-	deleteButton.Font = Enum.Font.Gotham
-	deleteButton.TextSize = 9
-	deleteButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-	deleteButton.Parent = entryFrame
-	
-	local delCorner = Instance.new("UICorner")
-	delCorner.CornerRadius = UDim.new(0, 4)
-	delCorner.Parent = deleteButton
-	
-	deleteButton.MouseButton1Click:Connect(function()
-		table.remove(currentRecording, index)
-		refreshLogDisplay()
-		entryCountLabel.Text = "Entries: " .. #currentRecording
-	end)
-	
-	-- Edit button
-	local editButton = Instance.new("TextButton")
-	editButton.Size = UDim2.new(0, 60, 0, 20)
-	editButton.Position = UDim2.new(0, 75, 1, -25)
-	editButton.BackgroundColor3 = Color3.fromRGB(80, 120, 180)
-	editButton.Text = "Edit"
-	editButton.Font = Enum.Font.Gotham
-	editButton.TextSize = 9
-	editButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-	editButton.Parent = entryFrame
-	
-	local editCorner = Instance.new("UICorner")
-	editCorner.CornerRadius = UDim.new(0, 4)
-	editCorner.Parent = editButton
-	
-	editButton.MouseButton1Click:Connect(function()
-		-- Simple edit: prompt for new action type
-		local newAction = promptForAction()
-		if newAction then
-			entry.action = newAction
-			refreshLogDisplay()
-		end
-	end)
-end
-
--- Simple action selector (cycles through actions)
-function promptForAction()
-	local actions = {"Idle", "Walking", "Running", "Jumping", "Climbing", "Swimming", "Falling"}
-	-- In a full implementation, you'd create a popup UI
-	-- For simplicity, we'll just cycle through
-	print("[Recorder] Edit feature: Create a custom input UI for full functionality")
-	return actions[math.random(1, #actions)]
-end
-
--- ========================================
--- REPLAY FUNCTIONS
--- ========================================
-
--- Start replaying the recording
-function startReplay()
-	if isReplaying then return end
-	if #currentRecording == 0 then
-		warn("[Recorder] No recording to replay")
-		return
-	end
-	
-	isReplaying = true
-	replayPaused = false
-	replayIndex = 1
-	
-	print("[Recorder] Starting replay with " .. #currentRecording .. " entries")
-	
-	-- Optional: Make character semi-transparent during replay
-	for _, part in ipairs(character:GetDescendants()) do
-		if part:IsA("BasePart") then
-			part.Transparency = part.Transparency + 0.3
-		end
-	end
-	
-	-- Disable character control during replay
-	humanoid.WalkSpeed = 0
-	humanoid.JumpPower = 0
-	
-	local startTime = tick()
-	
-	replayConnection = RunService.Heartbeat:Connect(function()
-		if not isReplaying or replayPaused then return end
-		
-		local elapsed = (tick() - startTime) * replaySpeed
-		
-		-- Find the appropriate entry for current time
-		while replayIndex <= #currentRecording do
-			local entry = currentRecording[replayIndex]
-			
-			if entry.timestamp > elapsed then
-				break
-			end
-			
-			-- Move character to this position
-			local targetPos = Vector3.new(entry.position[1], entry.position[2], entry.position[3])
-			
-			-- Smooth interpolation to next position
-			if replayIndex < #currentRecording then
-				local nextEntry = currentRecording[replayIndex + 1]
-				local nextPos = Vector3.new(nextEntry.position[1], nextEntry.position[2], nextEntry.position[3])
-				local timeDiff = nextEntry.timestamp - entry.timestamp
-				
-				if timeDiff > 0 then
-					local alpha = (elapsed - entry.timestamp) / timeDiff
-					alpha = math.clamp(alpha, 0, 1)
-					targetPos = targetPos:Lerp(nextPos, alpha)
-				end
-			end
-			
-			-- Apply position with smooth movement
-			local success, err = pcall(function()
-				humanoidRootPart.CFrame = CFrame.new(targetPos) * CFrame.Angles(0, math.rad(entry.rotation[6] or 0), 0)
-			end)
-			
-			if not success then
-				warn("[Recorder] Replay error:", err)
-			end
-			
-			replayIndex = replayIndex + 1
-		end
-		
-		-- Check if replay finished
-		if replayIndex > #currentRecording then
-			stopReplay()
-		end
-	end)
-end
-
--- Stop replay
-function stopReplay()
-	if not isReplaying then return end
-	
-	isReplaying = false
-	replayPaused = false
-	
-	if replayConnection then
-		replayConnection:Disconnect()
-		replayConnection = nil
-	end
-	
-	-- Restore character visibility
-	for _, part in ipairs(character:GetDescendants()) do
-		if part:IsA("BasePart") and part.Transparency > 0 then
-			part.Transparency = math.max(0, part.Transparency - 0.3)
-		end
-	end
-	
-	-- Re-enable character control
-	humanoid.WalkSpeed = 16
-	humanoid.JumpPower = 50
-	
-	print("[Recorder] Replay stopped")
-end
-
--- ========================================
--- SAVE/LOAD FUNCTIONS
--- ========================================
-
--- Export recording as JSON
-function exportRecording()
-	if #currentRecording == 0 then
-		warn("[Recorder] No recording to export")
-		return
-	end
-	
-	local success, jsonString = pcall(function()
-		return HttpService:JSONEncode({
-			version = "1.0",
-			recordingName = "Recording_" .. os.date("%Y%m%d_%H%M%S"),
-			entryCount = #currentRecording,
-			data = currentRecording
-		})
-	end)
-	
-	if success then
-		-- Try to copy to clipboard (may not work in all contexts)
-		local clipboardSuccess = pcall(function()
-			if setclipboard then
-				setclipboard(jsonString)
-				print("[Recorder] Recording exported and copied to clipboard!")
-			else
-				print("[Recorder] Recording exported (clipboard not available):")
-				print(jsonString)
-			end
-		end)
-		
-		if not clipboardSuccess then
-			print("[Recorder] Export successful. JSON output:")
-			print(jsonString)
-		end
-	else
-		warn("[Recorder] Failed to export recording:", jsonString)
-	end
-end
-
--- Import recording from JSON
-function importRecording()
-	-- In a full implementation, you'd create an input textbox
-	-- For now, we'll just log instructions
-	print("[Recorder] Import feature: Paste JSON in console or create input UI")
-	warn("[Recorder] To implement: Create a TextBox for JSON input in the UI")
-	
-	-- Example of how to parse:
-	-- local success, data = pcall(function()
-	--     return HttpService:JSONDecode(jsonString)
-	-- end)
-	-- if success and data.data then
-	--     currentRecording = data.data
-	--     refreshLogDisplay()
-	-- end
-end
-
--- Save current recording to saved list
-function saveRecordingToList(name)
-	if #currentRecording == 0 then
-		warn("[Recorder] No recording to save")
-		return
-	end
-	
-	local recordingCopy = {}
-	for i, entry in ipairs(currentRecording) do
-		recordingCopy[i] = {
-			timestamp = entry.timestamp,
-			position = {entry.position[1], entry.position[2], entry.position[3]},
-			action = entry.action,
-			rotation = entry.rotation,
-			cameraRotation = entry.cameraRotation
-		}
-	end
-	
-	table.insert(savedRecordings, {
-		name = name or ("Recording_" .. #savedRecordings + 1),
-		data = recordingCopy,
-		timestamp = os.time()
-	})
-	
-	print("[Recorder] Recording saved:", name)
-end
-
--- ========================================
 -- UPDATE FUNCTIONS
 -- ========================================
 
--- Update recording time display
 RunService.Heartbeat:Connect(function()
-	if isRecording then
+	if isRecording and recordingTimeLabel then
 		local elapsed = tick() - recordingStartTime
 		recordingTimeLabel.Text = "Time: " .. formatTime(elapsed)
-		
-		-- Update log periodically (every 30 entries)
-		if #currentRecording % 30 == 0 then
-			task.spawn(refreshLogDisplay)
-		end
 	end
 end)
 
@@ -1261,13 +930,27 @@ end)
 -- INPUT HANDLING
 -- ========================================
 
--- Handle keybinds
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if gameProcessed then return end
 	
 	-- R key to toggle recording
 	if input.KeyCode == Enum.KeyCode.R then
 		toggleRecording()
+	end
+	
+	-- RIGHT SHIFT to toggle GUI visibility
+	if input.KeyCode == Enum.KeyCode.RightShift then
+		if mainGui then
+			if isMinimized then
+				if minimizedIcon then
+					minimizedIcon.Visible = not minimizedIcon.Visible
+				end
+			else
+				if mainFrame then
+					mainFrame.Visible = not mainFrame.Visible
+				end
+			end
+		end
 	end
 end)
 
@@ -1277,23 +960,14 @@ player.CharacterAdded:Connect(function(newCharacter)
 	humanoid = character:WaitForChild("Humanoid")
 	humanoidRootPart = character:WaitForChild("HumanoidRootPart")
 	
-	-- Stop any active recording or replay
 	if isRecording then
 		stopRecording()
 	end
-	if isReplaying then
-		stopReplay()
+	if isPlaying then
+		stopPlayback()
 	end
 	
-	-- Reconnect state tracking
-	if stateConnection then
-		stateConnection:Disconnect()
-	end
-	stateConnection = humanoid.StateChanged:Connect(function(oldState, newState)
-		if isRecording then
-			lastAction = getHumanoidAction(newState)
-		end
-	end)
+	originalWalkSpeed = humanoid.WalkSpeed
 	
 	print("[Recorder] Character respawned - system ready")
 end)
@@ -1302,16 +976,12 @@ end)
 -- INITIALIZATION
 -- ========================================
 
--- Create UI on startup
 createUI()
 
--- Initial state setup
-print("[Recorder] Movement Recorder System Initialized")
-print("[Recorder] Press R to start/stop recording")
-print("[Recorder] Use UI for replay and save/load functions")
-
--- Success indicator
-wait(1)
-if mainGui and mainGui.Parent then
-	print("✓ [Recorder] System fully operational!")
-end
+print("=== Movement Recorder v3.0 Fully Loaded! ===")
+print("✓ Natural walking with Humanoid:MoveTo()")
+print("✓ No teleporting - real walking animations!")
+print("✓ Draggable GUI with minimize/maximize")
+print("✓ Press R to start/stop recording")
+print("✓ Press RIGHT SHIFT to toggle GUI visibility")
+print("✓ System ready!")
