@@ -1,5 +1,5 @@
 --[[
-	MOVEMENT RECORDER SYSTEM
+	MOVEMENT RECORDER SYSTEM v2.0
 	A complete client-side movement tracking and replay system for Roblox
 	Place in: StarterPlayer > StarterPlayerScripts
 	
@@ -8,10 +8,13 @@
 	- Editable log GUI with individual entry management
 	- Smooth replay system with speed controls
 	- Save/Load system with JSON export
+	- DRAGGABLE and minimizable GUI
 	- Modern, minimalist UI design
 	
 	Controls:
 	- R: Toggle recording on/off
+	- Drag the header to move GUI
+	- Click minimize button to collapse to icon
 	- UI buttons for all other functions
 ]]
 
@@ -38,6 +41,9 @@ local currentRecording = {}
 local recordingConnection = nil
 local stateConnection = nil
 local lastAction = "Idle"
+local lastPosition = nil
+local recordingUpdateInterval = 0.05 -- Record every 0.05 seconds (20 times per second)
+local lastRecordTime = 0
 
 -- Replay state
 local isReplaying = false
@@ -51,6 +57,8 @@ local savedRecordings = {}
 
 -- UI Elements (will be created later)
 local mainGui = nil
+local mainFrame = nil
+local minimizedIcon = nil
 local recordingButton = nil
 local statusLabel = nil
 local entryCountLabel = nil
@@ -58,6 +66,13 @@ local recordingTimeLabel = nil
 local scrollingFrame = nil
 local replayControlsFrame = nil
 local savedRecordingsFrame = nil
+local isMinimized = false
+
+-- Dragging variables
+local dragging = false
+local dragInput = nil
+local dragStart = nil
+local startPos = nil
 
 -- ========================================
 -- UTILITY FUNCTIONS
@@ -107,49 +122,124 @@ end
 local function startRecording()
 	if isRecording then return end
 	
+	-- Safety check
+	if not humanoidRootPart or not humanoid then
+		warn("[Recorder] Character not ready!")
+		return
+	end
+	
 	isRecording = true
 	recordingStartTime = tick()
 	currentRecording = {}
 	lastAction = "Idle"
+	lastPosition = humanoidRootPart.Position
+	lastRecordTime = 0
 	
 	-- Update UI
-	recordingButton.Text = "⏹ Stop Recording"
-	recordingButton.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
-	statusLabel.Text = "🔴 RECORDING"
-	statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+	if recordingButton then
+		recordingButton.Text = "⏹ Stop Recording"
+		recordingButton.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
+	end
+	if statusLabel then
+		statusLabel.Text = "🔴 RECORDING"
+		statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+	end
 	
-	-- Record movement data every frame
-	recordingConnection = RunService.Heartbeat:Connect(function()
+	-- Show recording indicator on minimized icon
+	if minimizedIcon then
+		local indicator = minimizedIcon:FindFirstChild("RecordingIndicator")
+		if indicator then
+			indicator.Visible = true
+			-- Pulse animation
+			task.spawn(function()
+				while isRecording do
+					TweenService:Create(indicator, TweenInfo.new(0.5, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
+						BackgroundColor3 = Color3.fromRGB(255, 150, 150)
+					}):Play()
+					wait(0.5)
+					TweenService:Create(indicator, TweenInfo.new(0.5, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
+						BackgroundColor3 = Color3.fromRGB(255, 50, 50)
+					}):Play()
+					wait(0.5)
+				end
+			end)
+		end
+	end
+	
+	print("[Recorder] Recording started!")
+	
+	-- Record movement data at intervals
+	recordingConnection = RunService.Heartbeat:Connect(function(deltaTime)
 		if not isRecording then return end
 		
+		-- Check if character still exists
+		if not humanoidRootPart or not humanoidRootPart.Parent then
+			warn("[Recorder] Character missing, stopping recording")
+			stopRecording()
+			return
+		end
+		
 		local currentTime = tick() - recordingStartTime
+		
+		-- Only record at specified intervals to optimize performance
+		if currentTime - lastRecordTime < recordingUpdateInterval then
+			return
+		end
+		lastRecordTime = currentTime
+		
 		local position = humanoidRootPart.Position
 		local rotation = humanoidRootPart.CFrame
 		
-		-- Determine action based on velocity and state
+		-- Determine action based on current state and movement
 		local action = lastAction
-		if humanoid.MoveVector.Magnitude > 0 then
-			action = humanoid.MoveSpeed > 16 and "Running" or "Walking"
-		elseif humanoid.MoveVector.Magnitude == 0 and lastAction ~= "Jumping" and lastAction ~= "Falling" then
-			action = "Idle"
+		local moveDirection = humanoid.MoveDirection
+		
+		-- Check if moving
+		if moveDirection.Magnitude > 0.1 then
+			-- Check speed to determine if running or walking
+			local velocity = humanoidRootPart.AssemblyLinearVelocity
+			local horizontalSpeed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
+			
+			if horizontalSpeed > 18 then
+				action = "Running"
+			elseif horizontalSpeed > 1 then
+				action = "Walking"
+			else
+				action = "Idle"
+			end
+		else
+			-- Not moving, check if in special state
+			if lastAction ~= "Jumping" and lastAction ~= "Falling" and lastAction ~= "Climbing" and lastAction ~= "Swimming" then
+				action = "Idle"
+			end
 		end
 		
-		-- Add entry to recording
-		table.insert(currentRecording, {
+		-- Store the entry
+		local entry = {
 			timestamp = currentTime,
 			position = {position.X, position.Y, position.Z},
 			action = action,
-			rotation = {rotation:GetComponents()}, -- Store full CFrame
+			rotation = {rotation:GetComponents()},
 			cameraRotation = {camera.CFrame:GetComponents()}
-		})
+		}
+		
+		table.insert(currentRecording, entry)
+		lastPosition = position
+		
+		-- Debug output every 50 entries
+		if #currentRecording % 50 == 0 then
+			print("[Recorder] Recorded " .. #currentRecording .. " entries")
+		end
 	end)
 	
-	-- Track state changes (jumping, climbing, etc.)
+	-- Track state changes (jumping, climbing, swimming, etc.)
 	stateConnection = humanoid.StateChanged:Connect(function(oldState, newState)
-		lastAction = getHumanoidAction(newState)
+		local newAction = getHumanoidAction(newState)
+		if newAction ~= "Idle" then
+			lastAction = newAction
+			print("[Recorder] State changed to: " .. newAction)
+		end
 	end)
-	
-	print("[Recorder] Recording started")
 end
 
 -- Stop recording
@@ -169,18 +259,32 @@ local function stopRecording()
 	end
 	
 	-- Update UI
-	recordingButton.Text = "⏺ Start Recording"
-	recordingButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
-	statusLabel.Text = "⚪ STOPPED"
-	statusLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+	if recordingButton then
+		recordingButton.Text = "⏺ Start Recording"
+		recordingButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+	end
+	if statusLabel then
+		statusLabel.Text = "⚪ STOPPED"
+		statusLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+	end
+	
+	-- Hide recording indicator on minimized icon
+	if minimizedIcon then
+		local indicator = minimizedIcon:FindFirstChild("RecordingIndicator")
+		if indicator then
+			indicator.Visible = false
+		end
+	end
 	
 	-- Update entry count
-	entryCountLabel.Text = "Entries: " .. #currentRecording
+	if entryCountLabel then
+		entryCountLabel.Text = "Entries: " .. #currentRecording
+	end
 	
 	-- Refresh the log display
-	refreshLogDisplay()
+	task.spawn(refreshLogDisplay)
 	
-	print("[Recorder] Recording stopped - " .. #currentRecording .. " entries")
+	print("[Recorder] Recording stopped - " .. #currentRecording .. " entries captured")
 end
 
 -- Toggle recording on/off
@@ -190,6 +294,110 @@ local function toggleRecording()
 	else
 		startRecording()
 	end
+end
+
+-- ========================================
+-- GUI DRAG FUNCTIONS
+-- ========================================
+
+-- Make a frame draggable
+local function makeDraggable(frame, dragHandle)
+	local dragging = false
+	local dragInput = nil
+	local dragStart = nil
+	local startPos = nil
+	
+	local function update(input)
+		local delta = input.Position - dragStart
+		local newPosition = UDim2.new(
+			startPos.X.Scale,
+			startPos.X.Offset + delta.X,
+			startPos.Y.Scale,
+			startPos.Y.Offset + delta.Y
+		)
+		frame.Position = newPosition
+	end
+	
+	dragHandle.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPos = frame.Position
+			
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					dragging = false
+				end
+			end)
+		end
+	end)
+	
+	dragHandle.InputChanged:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+			dragInput = input
+		end
+	end)
+	
+	UserInputService.InputChanged:Connect(function(input)
+		if input == dragInput and dragging then
+			update(input)
+		end
+	end)
+end
+
+-- Minimize GUI to floating icon
+local function minimizeGUI()
+	if not mainFrame or not minimizedIcon then return end
+	
+	isMinimized = true
+	
+	-- Animate main frame out
+	local tweenInfo = TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In)
+	local tween = TweenService:Create(mainFrame, tweenInfo, {
+		Size = UDim2.new(0, 0, 0, 0),
+		Position = UDim2.new(mainFrame.Position.X.Scale, mainFrame.Position.X.Offset + 200, mainFrame.Position.Y.Scale, mainFrame.Position.Y.Offset)
+	})
+	tween:Play()
+	
+	tween.Completed:Connect(function()
+		mainFrame.Visible = false
+	end)
+	
+	-- Show minimized icon
+	minimizedIcon.Visible = true
+	minimizedIcon.Size = UDim2.new(0, 0, 0, 0)
+	
+	local iconTween = TweenService:Create(minimizedIcon, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+		Size = UDim2.new(0, 60, 0, 60)
+	})
+	iconTween:Play()
+end
+
+-- Maximize GUI from floating icon
+local function maximizeGUI()
+	if not mainFrame or not minimizedIcon then return end
+	
+	isMinimized = false
+	
+	-- Hide minimized icon
+	local iconTween = TweenService:Create(minimizedIcon, TweenInfo.new(0.2, Enum.EasingStyle.Back, Enum.EasingDirection.In), {
+		Size = UDim2.new(0, 0, 0, 0)
+	})
+	iconTween:Play()
+	
+	iconTween.Completed:Connect(function()
+		minimizedIcon.Visible = false
+	end)
+	
+	-- Show main frame
+	mainFrame.Visible = true
+	mainFrame.Size = UDim2.new(0, 0, 0, 0)
+	
+	local tweenInfo = TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+	local tween = TweenService:Create(mainFrame, tweenInfo, {
+		Size = UDim2.new(0, 400, 0, 600)
+	})
+	tween:Play()
 end
 
 -- ========================================
@@ -206,10 +414,10 @@ local function createUI()
 	mainGui.Parent = player.PlayerGui
 	
 	-- Main Frame (collapsible panel)
-	local mainFrame = Instance.new("Frame")
+	mainFrame = Instance.new("Frame")
 	mainFrame.Name = "MainFrame"
 	mainFrame.Size = UDim2.new(0, 400, 0, 600)
-	mainFrame.Position = UDim2.new(1, -420, 0, 20)
+	mainFrame.Position = UDim2.new(0.5, -200, 0.5, -300) -- Centered by default
 	mainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
 	mainFrame.BorderSizePixel = 0
 	mainFrame.Parent = mainGui
@@ -223,7 +431,7 @@ local function createUI()
 	mainStroke.Thickness = 2
 	mainStroke.Parent = mainFrame
 	
-	-- Header
+	-- Header (Draggable)
 	local header = Instance.new("Frame")
 	header.Name = "Header"
 	header.Size = UDim2.new(1, 0, 0, 50)
@@ -235,8 +443,11 @@ local function createUI()
 	headerCorner.CornerRadius = UDim.new(0, 12)
 	headerCorner.Parent = header
 	
+	-- Make draggable
+	makeDraggable(mainFrame, header)
+	
 	local titleLabel = Instance.new("TextLabel")
-	titleLabel.Size = UDim2.new(1, -20, 1, 0)
+	titleLabel.Size = UDim2.new(1, -100, 1, 0)
 	titleLabel.Position = UDim2.new(0, 10, 0, 0)
 	titleLabel.BackgroundTransparency = 1
 	titleLabel.Text = "🎬 Movement Recorder"
@@ -245,6 +456,80 @@ local function createUI()
 	titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
 	titleLabel.TextXAlignment = Enum.TextXAlignment.Left
 	titleLabel.Parent = header
+	
+	-- Minimize Button
+	local minimizeButton = Instance.new("TextButton")
+	minimizeButton.Name = "MinimizeButton"
+	minimizeButton.Size = UDim2.new(0, 35, 0, 35)
+	minimizeButton.Position = UDim2.new(1, -45, 0, 7.5)
+	minimizeButton.BackgroundColor3 = Color3.fromRGB(80, 80, 90)
+	minimizeButton.Text = "−"
+	minimizeButton.Font = Enum.Font.GothamBold
+	minimizeButton.TextSize = 24
+	minimizeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+	minimizeButton.Parent = header
+	
+	local minCorner = Instance.new("UICorner")
+	minCorner.CornerRadius = UDim.new(0, 8)
+	minCorner.Parent = minimizeButton
+	
+	minimizeButton.MouseButton1Click:Connect(minimizeGUI)
+	
+	-- Hover effect for minimize button
+	minimizeButton.MouseEnter:Connect(function()
+		minimizeButton.BackgroundColor3 = Color3.fromRGB(100, 100, 110)
+	end)
+	minimizeButton.MouseLeave:Connect(function()
+		minimizeButton.BackgroundColor3 = Color3.fromRGB(80, 80, 90)
+	end)
+	
+	-- Minimized Floating Icon
+	minimizedIcon = Instance.new("ImageButton")
+	minimizedIcon.Name = "MinimizedIcon"
+	minimizedIcon.Size = UDim2.new(0, 60, 0, 60)
+	minimizedIcon.Position = UDim2.new(1, -80, 0, 20)
+	minimizedIcon.BackgroundColor3 = Color3.fromRGB(50, 120, 220)
+	minimizedIcon.BorderSizePixel = 0
+	minimizedIcon.Visible = false
+	minimizedIcon.Parent = mainGui
+	
+	local iconCorner = Instance.new("UICorner")
+	iconCorner.CornerRadius = UDim.new(0, 30)
+	iconCorner.Parent = minimizedIcon
+	
+	local iconStroke = Instance.new("UIStroke")
+	iconStroke.Color = Color3.fromRGB(100, 160, 255)
+	iconStroke.Thickness = 3
+	iconStroke.Parent = minimizedIcon
+	
+	local iconLabel = Instance.new("TextLabel")
+	iconLabel.Size = UDim2.new(1, 0, 1, 0)
+	iconLabel.BackgroundTransparency = 1
+	iconLabel.Text = "🎬"
+	iconLabel.Font = Enum.Font.GothamBold
+	iconLabel.TextSize = 30
+	iconLabel.Parent = minimizedIcon
+	
+	-- Make minimized icon draggable too
+	makeDraggable(minimizedIcon, minimizedIcon)
+	
+	-- Click to maximize
+	minimizedIcon.MouseButton1Click:Connect(maximizeGUI)
+	
+	-- Recording indicator on minimized icon
+	local recordingIndicator = Instance.new("Frame")
+	recordingIndicator.Name = "RecordingIndicator"
+	recordingIndicator.Size = UDim2.new(0, 16, 0, 16)
+	recordingIndicator.Position = UDim2.new(1, -4, 0, -4)
+	recordingIndicator.AnchorPoint = Vector2.new(1, 0)
+	recordingIndicator.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
+	recordingIndicator.BorderSizePixel = 0
+	recordingIndicator.Visible = false
+	recordingIndicator.Parent = minimizedIcon
+	
+	local indicatorCorner = Instance.new("UICorner")
+	indicatorCorner.CornerRadius = UDim.new(1, 0)
+	indicatorCorner.Parent = recordingIndicator
 	
 	-- Status Label
 	statusLabel = Instance.new("TextLabel")
