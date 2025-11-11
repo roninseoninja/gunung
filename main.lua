@@ -1,984 +1,467 @@
 --[[
 ═══════════════════════════════════════════════════════════════════════════════
-    ROBLOX MOVEMENT RECORDER SYSTEM
-    A comprehensive frame-by-frame movement recording and editing system
+    ROBLOX MOVEMENT RECORDER v2.0 - SIMPLIFIED & ROBUST
     
-    Features:
-    - Frame-by-frame movement recording
-    - Full timeline editing capabilities
-    - Natural playback using Humanoid:MoveTo()
-    - Undo/Redo with character stability
-    - Save/Load recordings
+    Place in: StarterPlayer > StarterPlayerScripts (as LocalScript)
     
-    Usage: Place this LocalScript in StarterPlayer > StarterPlayerScripts
+    Press F1 to open GUI
 ═══════════════════════════════════════════════════════════════════════════════
 --]]
 
--- Services
+print("=== Movement Recorder Loading ===")
+
+-- Wait for everything to load
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
 local HttpService = game:GetService("HttpService")
 
--- Player and Character
 local player = Players.LocalPlayer
 local character = player.Character or player.CharacterAdded:Wait()
 local humanoid = character:WaitForChild("Humanoid")
-local rootPart = character:WaitForChild("HumanoidRootPart")
+local hrp = character:WaitForChild("HumanoidRootPart")
 
--- Constants
-local RECORD_FPS = 30 -- Configurable frame rate
-local FRAME_TIME = 1 / RECORD_FPS
-local MAX_UNDO_HISTORY = 50
+print("Player loaded:", player.Name)
 
---[[═══════════════════════════════════════════════════════════════════════════
-    DATA STRUCTURES
-═══════════════════════════════════════════════════════════════════════════════]]
+-- Simple state
+local isRecording = false
+local isPlaying = false
+local frames = {}
+local currentFrame = 1
+local recordConnection = nil
+local playConnection = nil
 
--- Frame data structure
-local function createFrame(position, rotation, state, timestamp, velocity)
-    return {
-        Position = position,
-        Rotation = rotation,
-        State = state, -- Humanoid state
-        Timestamp = timestamp,
-        Velocity = velocity or Vector3.new(0, 0, 0),
-        JumpPower = humanoid.JumpPower,
-        WalkSpeed = humanoid.WalkSpeed
-    }
-end
-
--- Recording storage
-local Recording = {
-    Frames = {},
-    Name = "Untitled Recording",
-    Duration = 0,
-    FPS = RECORD_FPS,
-    CurrentFrame = 1
-}
-
--- Undo/Redo system
-local EditHistory = {
-    UndoStack = {},
-    RedoStack = {},
-    MaxHistory = MAX_UNDO_HISTORY
-}
-
--- Recording state
-local RecordingState = {
-    IsRecording = false,
-    IsPlaying = false,
-    IsPaused = false,
-    PlaybackSpeed = 1.0,
-    Loop = false,
-    LastRecordTime = 0,
-    PlaybackStartTime = 0,
-    PlaybackConnection = nil,
-    SelectedFrame = nil
-}
+-- Undo system
+local history = {}
+local historyIndex = 0
 
 --[[═══════════════════════════════════════════════════════════════════════════
-    UNDO/REDO SYSTEM
+    CORE FUNCTIONS
 ═══════════════════════════════════════════════════════════════════════════════]]
 
--- Save current state for undo
-local function saveStateForUndo(action, data)
-    -- Create a deep copy of current frames
-    local stateCopy = {
-        Action = action,
-        Frames = {},
-        Data = data,
-        Timestamp = tick()
-    }
-    
-    for i, frame in ipairs(Recording.Frames) do
-        stateCopy.Frames[i] = {
-            Position = frame.Position,
-            Rotation = frame.Rotation,
-            State = frame.State,
-            Timestamp = frame.Timestamp,
-            Velocity = frame.Velocity,
-            JumpPower = frame.JumpPower,
-            WalkSpeed = frame.WalkSpeed
+-- Save state for undo
+local function saveHistory()
+    historyIndex = historyIndex + 1
+    history[historyIndex] = {}
+    for i, frame in ipairs(frames) do
+        history[historyIndex][i] = {
+            pos = frame.pos,
+            rot = frame.rot,
+            state = frame.state
         }
     end
-    
-    table.insert(EditHistory.UndoStack, stateCopy)
-    
-    -- Limit undo stack size
-    if #EditHistory.UndoStack > EditHistory.MaxHistory then
-        table.remove(EditHistory.UndoStack, 1)
+    -- Clear redo history
+    for i = historyIndex + 1, #history do
+        history[i] = nil
     end
-    
-    -- Clear redo stack when new action is performed
-    EditHistory.RedoStack = {}
 end
 
--- Undo last action with character stability
-local function performUndo()
-    if #EditHistory.UndoStack == 0 then
-        print("Nothing to undo")
-        return false
+-- Undo
+local function undo()
+    if historyIndex > 1 then
+        historyIndex = historyIndex - 1
+        frames = {}
+        for i, frame in ipairs(history[historyIndex]) do
+            frames[i] = {
+                pos = frame.pos,
+                rot = frame.rot,
+                state = frame.state
+            }
+        end
+        print("Undo - Frame count:", #frames)
+        return true
     end
-    
-    -- CRITICAL: Anchor character to prevent falling during undo
-    local wasAnchored = rootPart.Anchored
-    rootPart.Anchored = true
-    
-    -- Save current state to redo stack
-    local currentState = {
-        Action = "Redo Point",
-        Frames = {},
-        Timestamp = tick()
-    }
-    
-    for i, frame in ipairs(Recording.Frames) do
-        currentState.Frames[i] = {
-            Position = frame.Position,
-            Rotation = frame.Rotation,
-            State = frame.State,
-            Timestamp = frame.Timestamp,
-            Velocity = frame.Velocity,
-            JumpPower = frame.JumpPower,
-            WalkSpeed = frame.WalkSpeed
-        }
-    end
-    
-    table.insert(EditHistory.RedoStack, currentState)
-    
-    -- Restore previous state
-    local previousState = table.remove(EditHistory.UndoStack)
-    Recording.Frames = {}
-    
-    for i, frame in ipairs(previousState.Frames) do
-        Recording.Frames[i] = {
-            Position = frame.Position,
-            Rotation = frame.Rotation,
-            State = frame.State,
-            Timestamp = frame.Timestamp,
-            Velocity = frame.Velocity,
-            JumpPower = frame.JumpPower,
-            WalkSpeed = frame.WalkSpeed
-        }
-    end
-    
-    -- Restore character to position if there are frames
-    if #Recording.Frames > 0 and RecordingState.SelectedFrame then
-        local frameIndex = math.clamp(RecordingState.SelectedFrame, 1, #Recording.Frames)
-        local frame = Recording.Frames[frameIndex]
-        rootPart.CFrame = CFrame.new(frame.Position) * CFrame.Angles(frame.Rotation.X, frame.Rotation.Y, frame.Rotation.Z)
-    end
-    
-    -- Wait a moment for physics to settle, then unanchor
-    task.wait(0.1)
-    rootPart.Anchored = wasAnchored
-    
-    print("Undone: " .. previousState.Action)
-    return true
+    print("Nothing to undo")
+    return false
 end
 
--- Redo last undone action with character stability
-local function performRedo()
-    if #EditHistory.RedoStack == 0 then
-        print("Nothing to redo")
-        return false
+-- Redo
+local function redo()
+    if historyIndex < #history then
+        historyIndex = historyIndex + 1
+        frames = {}
+        for i, frame in ipairs(history[historyIndex]) do
+            frames[i] = {
+                pos = frame.pos,
+                rot = frame.rot,
+                state = frame.state
+            }
+        end
+        print("Redo - Frame count:", #frames)
+        return true
     end
-    
-    -- CRITICAL: Anchor character to prevent falling during redo
-    local wasAnchored = rootPart.Anchored
-    rootPart.Anchored = true
-    
-    -- Save current state to undo stack
-    local currentState = {
-        Action = "Undo Point",
-        Frames = {},
-        Timestamp = tick()
-    }
-    
-    for i, frame in ipairs(Recording.Frames) do
-        currentState.Frames[i] = {
-            Position = frame.Position,
-            Rotation = frame.Rotation,
-            State = frame.State,
-            Timestamp = frame.Timestamp,
-            Velocity = frame.Velocity,
-            JumpPower = frame.JumpPower,
-            WalkSpeed = frame.WalkSpeed
-        }
-    end
-    
-    table.insert(EditHistory.UndoStack, currentState)
-    
-    -- Restore redo state
-    local redoState = table.remove(EditHistory.RedoStack)
-    Recording.Frames = {}
-    
-    for i, frame in ipairs(redoState.Frames) do
-        Recording.Frames[i] = {
-            Position = frame.Position,
-            Rotation = frame.Rotation,
-            State = frame.State,
-            Timestamp = frame.Timestamp,
-            Velocity = frame.Velocity,
-            JumpPower = frame.JumpPower,
-            WalkSpeed = frame.WalkSpeed
-        }
-    end
-    
-    -- Restore character to position if there are frames
-    if #Recording.Frames > 0 and RecordingState.SelectedFrame then
-        local frameIndex = math.clamp(RecordingState.SelectedFrame, 1, #Recording.Frames)
-        local frame = Recording.Frames[frameIndex]
-        rootPart.CFrame = CFrame.new(frame.Position) * CFrame.Angles(frame.Rotation.X, frame.Rotation.Y, frame.Rotation.Z)
-    end
-    
-    -- Wait a moment for physics to settle, then unanchor
-    task.wait(0.1)
-    rootPart.Anchored = wasAnchored
-    
-    print("Redone: " .. redoState.Action)
-    return true
+    print("Nothing to redo")
+    return false
 end
-
---[[═══════════════════════════════════════════════════════════════════════════
-    RECORDING SYSTEM
-═══════════════════════════════════════════════════════════════════════════════]]
 
 -- Start recording
-local function startRecording()
-    if RecordingState.IsRecording then
-        print("Already recording!")
-        return
-    end
+local function startRecord()
+    if isRecording then return end
     
-    -- Reset recording data
-    Recording.Frames = {}
-    Recording.CurrentFrame = 1
-    Recording.Duration = 0
+    frames = {}
+    currentFrame = 1
+    isRecording = true
     
-    -- Clear undo/redo history
-    EditHistory.UndoStack = {}
-    EditHistory.RedoStack = {}
-    
-    RecordingState.IsRecording = true
-    RecordingState.LastRecordTime = tick()
+    saveHistory()
     
     print("Recording started...")
     
-    -- Record loop
-    RecordingState.RecordConnection = RunService.Heartbeat:Connect(function()
-        local currentTime = tick()
+    recordConnection = RunService.Heartbeat:Connect(function(dt)
+        -- Record every frame
+        local cf = hrp.CFrame
+        local state = humanoid:GetState()
         
-        if currentTime - RecordingState.LastRecordTime >= FRAME_TIME then
-            -- Capture current frame
-            local position = rootPart.Position
-            local rotation = Vector3.new(rootPart.CFrame:ToEulerAnglesXYZ())
-            local state = humanoid:GetState()
-            local velocity = rootPart.Velocity
-            
-            local frame = createFrame(
-                position,
-                rotation,
-                state,
-                currentTime - RecordingState.LastRecordTime,
-                velocity
-            )
-            
-            table.insert(Recording.Frames, frame)
-            Recording.Duration = Recording.Duration + FRAME_TIME
-            RecordingState.LastRecordTime = currentTime
-        end
+        table.insert(frames, {
+            pos = cf.Position,
+            rot = Vector3.new(cf:ToEulerAnglesXYZ()),
+            state = state,
+            vel = hrp.AssemblyLinearVelocity
+        })
     end)
 end
 
 -- Stop recording
-local function stopRecording()
-    if not RecordingState.IsRecording then
-        print("Not recording!")
-        return
+local function stopRecord()
+    if not isRecording then return end
+    
+    isRecording = false
+    
+    if recordConnection then
+        recordConnection:Disconnect()
+        recordConnection = nil
     end
     
-    RecordingState.IsRecording = false
-    
-    if RecordingState.RecordConnection then
-        RecordingState.RecordConnection:Disconnect()
-        RecordingState.RecordConnection = nil
-    end
-    
-    print("Recording stopped. Captured " .. #Recording.Frames .. " frames")
+    print("Recording stopped - Frames:", #frames)
 end
 
---[[═══════════════════════════════════════════════════════════════════════════
-    PLAYBACK SYSTEM (Using Humanoid:MoveTo for natural movement)
-═══════════════════════════════════════════════════════════════════════════════]]
-
--- Interpolate between frames for smooth movement
-local function interpolateFrames(frame1, frame2, alpha)
-    return {
-        Position = frame1.Position:Lerp(frame2.Position, alpha),
-        Rotation = Vector3.new(
-            frame1.Rotation.X + (frame2.Rotation.X - frame1.Rotation.X) * alpha,
-            frame1.Rotation.Y + (frame2.Rotation.Y - frame1.Rotation.Y) * alpha,
-            frame1.Rotation.Z + (frame2.Rotation.Z - frame1.Rotation.Z) * alpha
-        ),
-        State = frame1.State
-    }
-end
-
--- Play recording using Humanoid:MoveTo() for natural movement
-local function playRecording()
-    if #Recording.Frames == 0 then
+-- Play recording with natural movement
+local function startPlay()
+    if #frames == 0 then
         print("No recording to play!")
         return
     end
     
-    if RecordingState.IsPlaying then
-        print("Already playing!")
-        return
-    end
+    if isPlaying then return end
     
-    RecordingState.IsPlaying = true
-    RecordingState.IsPaused = false
-    RecordingState.PlaybackStartTime = tick()
-    Recording.CurrentFrame = 1
+    isPlaying = true
+    currentFrame = 1
     
     print("Playing recording...")
     
-    local currentFrameIndex = 1
-    local moveToConnection = nil
+    -- Teleport to first frame
+    hrp.CFrame = CFrame.new(frames[1].pos) * CFrame.Angles(frames[1].rot.X, frames[1].rot.Y, frames[1].rot.Z)
     
-    RecordingState.PlaybackConnection = RunService.Heartbeat:Connect(function()
-        if RecordingState.IsPaused then
+    playConnection = RunService.Heartbeat:Connect(function(dt)
+        if currentFrame > #frames then
+            stopPlay()
             return
         end
         
-        if currentFrameIndex > #Recording.Frames then
-            if RecordingState.Loop then
-                currentFrameIndex = 1
-                RecordingState.PlaybackStartTime = tick()
-            else
-                stopPlayback()
-                return
-            end
+        local frame = frames[currentFrame]
+        local nextFrame = frames[math.min(currentFrame + 1, #frames)]
+        
+        -- Use BodyVelocity for smooth movement
+        local distance = (nextFrame.pos - hrp.Position).Magnitude
+        
+        if distance > 0.1 then
+            -- Move towards next position
+            local direction = (nextFrame.pos - hrp.Position).Unit
+            local speed = math.min(distance / dt, 50) -- Cap speed
+            
+            -- Apply velocity
+            hrp.AssemblyLinearVelocity = direction * speed
+            
+            -- Apply rotation
+            local targetCF = CFrame.new(hrp.Position) * CFrame.Angles(nextFrame.rot.X, nextFrame.rot.Y, nextFrame.rot.Z)
+            hrp.CFrame = hrp.CFrame:Lerp(targetCF, 0.5)
         end
         
-        local frame = Recording.Frames[currentFrameIndex]
-        Recording.CurrentFrame = currentFrameIndex
-        
-        -- CRITICAL: Use Humanoid:MoveTo() for natural movement
-        if currentFrameIndex < #Recording.Frames then
-            local nextFrame = Recording.Frames[currentFrameIndex + 1]
-            
-            -- Calculate distance to next position
-            local distance = (nextFrame.Position - rootPart.Position).Magnitude
-            
-            -- Only MoveTo if distance is significant
-            if distance > 0.5 then
-                humanoid:MoveTo(nextFrame.Position)
-            end
-            
-            -- Handle jumping
-            if nextFrame.State == Enum.HumanoidStateType.Jumping or 
-               nextFrame.State == Enum.HumanoidStateType.Freefall then
-                humanoid.Jump = true
-            end
-            
-            -- Apply rotation smoothly
-            local targetCFrame = CFrame.new(rootPart.Position) * 
-                                CFrame.Angles(nextFrame.Rotation.X, nextFrame.Rotation.Y, nextFrame.Rotation.Z)
-            rootPart.CFrame = rootPart.CFrame:Lerp(targetCFrame, 0.3)
+        -- Handle jumping
+        if frame.state == Enum.HumanoidStateType.Jumping or frame.state == Enum.HumanoidStateType.Freefall then
+            humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
         end
         
-        -- Advance frame based on playback speed
-        local frameAdvance = RecordingState.PlaybackSpeed * (1 / RECORD_FPS) / FRAME_TIME
-        currentFrameIndex = currentFrameIndex + frameAdvance
-        currentFrameIndex = math.floor(currentFrameIndex)
+        currentFrame = currentFrame + 1
     end)
 end
 
--- Stop playback
-local function stopPlayback()
-    RecordingState.IsPlaying = false
-    RecordingState.IsPaused = false
+-- Stop playing
+local function stopPlay()
+    if not isPlaying then return end
     
-    if RecordingState.PlaybackConnection then
-        RecordingState.PlaybackConnection:Disconnect()
-        RecordingState.PlaybackConnection = nil
+    isPlaying = false
+    
+    if playConnection then
+        playConnection:Disconnect()
+        playConnection = nil
     end
+    
+    -- Stop movement
+    hrp.AssemblyLinearVelocity = Vector3.zero
     
     print("Playback stopped")
 end
 
--- Pause playback
-local function pausePlayback()
-    if not RecordingState.IsPlaying then
-        print("Not playing!")
-        return
-    end
+-- Jump to frame
+local function jumpToFrame(frameNum)
+    if frameNum < 1 or frameNum > #frames then return end
     
-    RecordingState.IsPaused = not RecordingState.IsPaused
-    print(RecordingState.IsPaused and "Playback paused" or "Playback resumed")
-end
-
--- Jump to specific frame
-local function jumpToFrame(frameNumber)
-    if frameNumber < 1 or frameNumber > #Recording.Frames then
-        print("Invalid frame number!")
-        return
-    end
+    local frame = frames[frameNum]
     
-    Recording.CurrentFrame = frameNumber
-    local frame = Recording.Frames[frameNumber]
+    -- Anchor to prevent falling
+    hrp.Anchored = true
+    hrp.CFrame = CFrame.new(frame.pos) * CFrame.Angles(frame.rot.X, frame.rot.Y, frame.rot.Z)
+    task.wait(0.05)
+    hrp.Anchored = false
     
-    -- CRITICAL: Anchor before teleporting to frame
-    local wasAnchored = rootPart.Anchored
-    rootPart.Anchored = true
-    
-    -- Set position and rotation
-    rootPart.CFrame = CFrame.new(frame.Position) * CFrame.Angles(frame.Rotation.X, frame.Rotation.Y, frame.Rotation.Z)
-    
-    -- Wait and unanchor
-    task.wait(0.1)
-    rootPart.Anchored = wasAnchored
-    
-    RecordingState.SelectedFrame = frameNumber
-    print("Jumped to frame " .. frameNumber)
-end
-
---[[═══════════════════════════════════════════════════════════════════════════
-    FRAME EDITING SYSTEM
-═══════════════════════════════════════════════════════════════════════════════]]
-
--- Modify a specific frame
-local function modifyFrame(frameIndex, newPosition, newRotation, newState)
-    if frameIndex < 1 or frameIndex > #Recording.Frames then
-        print("Invalid frame index!")
-        return false
-    end
-    
-    -- Save state for undo
-    saveStateForUndo("Modify Frame " .. frameIndex, {
-        FrameIndex = frameIndex,
-        OldFrame = Recording.Frames[frameIndex]
-    })
-    
-    local frame = Recording.Frames[frameIndex]
-    
-    if newPosition then
-        frame.Position = newPosition
-    end
-    
-    if newRotation then
-        frame.Rotation = newRotation
-    end
-    
-    if newState then
-        frame.State = newState
-    end
-    
-    print("Frame " .. frameIndex .. " modified")
-    return true
-end
-
--- Insert new frame
-local function insertFrame(afterIndex, position, rotation, state)
-    if afterIndex < 0 or afterIndex > #Recording.Frames then
-        print("Invalid insert position!")
-        return false
-    end
-    
-    -- Save state for undo
-    saveStateForUndo("Insert Frame", {
-        InsertIndex = afterIndex + 1
-    })
-    
-    local newFrame = createFrame(
-        position or rootPart.Position,
-        rotation or Vector3.new(rootPart.CFrame:ToEulerAnglesXYZ()),
-        state or humanoid:GetState(),
-        FRAME_TIME,
-        Vector3.new(0, 0, 0)
-    )
-    
-    table.insert(Recording.Frames, afterIndex + 1, newFrame)
-    print("Frame inserted at position " .. (afterIndex + 1))
-    return true
+    currentFrame = frameNum
+    print("Jumped to frame:", frameNum)
 end
 
 -- Delete frame
-local function deleteFrame(frameIndex)
-    if frameIndex < 1 or frameIndex > #Recording.Frames then
-        print("Invalid frame index!")
-        return false
+local function deleteFrame(frameNum)
+    if frameNum < 1 or frameNum > #frames then return end
+    if #frames <= 1 then 
+        print("Cannot delete last frame")
+        return 
     end
     
-    if #Recording.Frames <= 1 then
-        print("Cannot delete the only frame!")
-        return false
-    end
-    
-    -- Save state for undo
-    saveStateForUndo("Delete Frame " .. frameIndex, {
-        FrameIndex = frameIndex,
-        DeletedFrame = Recording.Frames[frameIndex]
-    })
-    
-    table.remove(Recording.Frames, frameIndex)
-    print("Frame " .. frameIndex .. " deleted")
-    return true
+    saveHistory()
+    table.remove(frames, frameNum)
+    print("Frame deleted:", frameNum)
 end
 
--- Adjust frame timing
-local function adjustFrameTiming(frameIndex, newTimestamp)
-    if frameIndex < 1 or frameIndex > #Recording.Frames then
-        print("Invalid frame index!")
-        return false
-    end
-    
-    -- Save state for undo
-    saveStateForUndo("Adjust Timing " .. frameIndex, {
-        FrameIndex = frameIndex,
-        OldTimestamp = Recording.Frames[frameIndex].Timestamp
-    })
-    
-    Recording.Frames[frameIndex].Timestamp = newTimestamp
-    print("Frame " .. frameIndex .. " timing adjusted")
-    return true
-end
-
---[[═══════════════════════════════════════════════════════════════════════════
-    SAVE/LOAD SYSTEM
-═══════════════════════════════════════════════════════════════════════════════]]
-
--- Export recording as JSON string
-local function exportRecording()
-    local exportData = {
-        Name = Recording.Name,
-        FPS = Recording.FPS,
-        Duration = Recording.Duration,
-        FrameCount = #Recording.Frames,
-        Frames = {}
-    }
-    
-    for i, frame in ipairs(Recording.Frames) do
-        table.insert(exportData.Frames, {
-            Position = {frame.Position.X, frame.Position.Y, frame.Position.Z},
-            Rotation = {frame.Rotation.X, frame.Rotation.Y, frame.Rotation.Z},
-            State = tostring(frame.State),
-            Timestamp = frame.Timestamp,
-            Velocity = {frame.Velocity.X, frame.Velocity.Y, frame.Velocity.Z},
-            JumpPower = frame.JumpPower,
-            WalkSpeed = frame.WalkSpeed
+-- Export
+local function exportFrames()
+    local data = {frames = {}}
+    for i, frame in ipairs(frames) do
+        table.insert(data.frames, {
+            pos = {frame.pos.X, frame.pos.Y, frame.pos.Z},
+            rot = {frame.rot.X, frame.rot.Y, frame.rot.Z}
         })
     end
-    
-    local json = HttpService:JSONEncode(exportData)
-    print("Recording exported to clipboard (JSON)")
-    print("Frame count: " .. #Recording.Frames)
-    
+    local json = HttpService:JSONEncode(data)
+    print("=== EXPORT DATA ===")
+    print(json)
+    print("=== END EXPORT ===")
     return json
 end
 
--- Import recording from JSON string
-local function importRecording(jsonString)
-    local success, importData = pcall(function()
-        return HttpService:JSONDecode(jsonString)
-    end)
-    
-    if not success then
-        print("Failed to import recording: Invalid JSON")
-        return false
-    end
-    
-    -- Save current state for undo
-    saveStateForUndo("Import Recording", {})
-    
-    Recording.Name = importData.Name or "Imported Recording"
-    Recording.FPS = importData.FPS or RECORD_FPS
-    Recording.Duration = importData.Duration or 0
-    Recording.Frames = {}
-    
-    for i, frameData in ipairs(importData.Frames) do
-        local frame = {
-            Position = Vector3.new(frameData.Position[1], frameData.Position[2], frameData.Position[3]),
-            Rotation = Vector3.new(frameData.Rotation[1], frameData.Rotation[2], frameData.Rotation[3]),
-            State = Enum.HumanoidStateType[frameData.State:gsub("Enum.HumanoidStateType.", "")] or Enum.HumanoidStateType.Running,
-            Timestamp = frameData.Timestamp,
-            Velocity = Vector3.new(frameData.Velocity[1], frameData.Velocity[2], frameData.Velocity[3]),
-            JumpPower = frameData.JumpPower or 50,
-            WalkSpeed = frameData.WalkSpeed or 16
-        }
-        table.insert(Recording.Frames, frame)
-    end
-    
-    print("Recording imported: " .. Recording.Name)
-    print("Frame count: " .. #Recording.Frames)
-    return true
-end
-
 --[[═══════════════════════════════════════════════════════════════════════════
-    GUI SYSTEM
+    GUI
 ═══════════════════════════════════════════════════════════════════════════════]]
 
--- Create main GUI
-local function createGUI()
-    local screenGui = Instance.new("ScreenGui")
-    screenGui.Name = "MovementRecorderGUI"
-    screenGui.ResetOnSpawn = false
-    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+local gui = Instance.new("ScreenGui")
+gui.Name = "MovementRecorder"
+gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+-- Main frame
+local main = Instance.new("Frame")
+main.Name = "Main"
+main.Size = UDim2.new(0, 400, 0, 500)
+main.Position = UDim2.new(0.5, -200, 0.5, -250)
+main.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+main.BorderSizePixel = 2
+main.BorderColor3 = Color3.fromRGB(255, 255, 255)
+main.Visible = false
+main.Parent = gui
+
+-- Title
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, 0, 0, 40)
+title.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+title.BorderSizePixel = 0
+title.Text = "MOVEMENT RECORDER"
+title.TextColor3 = Color3.fromRGB(255, 255, 255)
+title.TextSize = 18
+title.Font = Enum.Font.SourceSansBold
+title.Parent = main
+
+-- Info label
+local info = Instance.new("TextLabel")
+info.Size = UDim2.new(1, -20, 0, 60)
+info.Position = UDim2.new(0, 10, 0, 50)
+info.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+info.BorderSizePixel = 1
+info.BorderColor3 = Color3.fromRGB(255, 255, 255)
+info.Text = "Frames: 0\nCurrent: 0\nStatus: Idle"
+info.TextColor3 = Color3.fromRGB(255, 255, 255)
+info.TextSize = 16
+info.Font = Enum.Font.SourceSans
+info.TextYAlignment = Enum.TextYAlignment.Top
+info.Parent = main
+
+-- Button creator
+local function createButton(name, text, pos, callback)
+    local btn = Instance.new("TextButton")
+    btn.Name = name
+    btn.Size = UDim2.new(0, 180, 0, 40)
+    btn.Position = pos
+    btn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    btn.BorderSizePixel = 1
+    btn.BorderColor3 = Color3.fromRGB(255, 255, 255)
+    btn.Text = text
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.TextSize = 16
+    btn.Font = Enum.Font.SourceSansBold
+    btn.Parent = main
     
-    -- Main frame
-    local mainFrame = Instance.new("Frame")
-    mainFrame.Name = "MainFrame"
-    mainFrame.Size = UDim2.new(0, 600, 0, 400)
-    mainFrame.Position = UDim2.new(0.5, -300, 0.5, -200)
-    mainFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-    mainFrame.BorderSizePixel = 0
-    mainFrame.Parent = screenGui
+    btn.MouseButton1Click:Connect(callback)
     
-    -- Add corner
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 8)
-    corner.Parent = mainFrame
-    
-    -- Title
-    local title = Instance.new("TextLabel")
-    title.Name = "Title"
-    title.Size = UDim2.new(1, 0, 0, 40)
-    title.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-    title.BorderSizePixel = 0
-    title.Text = "Movement Recorder"
-    title.TextColor3 = Color3.fromRGB(255, 255, 255)
-    title.TextSize = 20
-    title.Font = Enum.Font.GothamBold
-    title.Parent = mainFrame
-    
-    -- Title corner
-    local titleCorner = Instance.new("UICorner")
-    titleCorner.CornerRadius = UDim.new(0, 8)
-    titleCorner.Parent = title
-    
-    -- Control buttons frame
-    local controlsFrame = Instance.new("Frame")
-    controlsFrame.Name = "ControlsFrame"
-    controlsFrame.Size = UDim2.new(1, -20, 0, 60)
-    controlsFrame.Position = UDim2.new(0, 10, 0, 50)
-    controlsFrame.BackgroundTransparency = 1
-    controlsFrame.Parent = mainFrame
-    
-    -- Button creation helper
-    local function createButton(name, text, position, callback)
-        local button = Instance.new("TextButton")
-        button.Name = name
-        button.Size = UDim2.new(0, 90, 0, 50)
-        button.Position = position
-        button.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-        button.BorderSizePixel = 0
-        button.Text = text
-        button.TextColor3 = Color3.fromRGB(255, 255, 255)
-        button.TextSize = 14
-        button.Font = Enum.Font.Gotham
-        button.Parent = controlsFrame
-        
-        local buttonCorner = Instance.new("UICorner")
-        buttonCorner.CornerRadius = UDim.new(0, 6)
-        buttonCorner.Parent = button
-        
-        button.MouseButton1Click:Connect(callback)
-        
-        -- Hover effect
-        button.MouseEnter:Connect(function()
-            button.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
-        end)
-        
-        button.MouseLeave:Connect(function()
-            button.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-        end)
-        
-        return button
-    end
-    
-    -- Control buttons
-    local recordBtn = createButton("RecordBtn", "Record", UDim2.new(0, 0, 0, 0), function()
-        if not RecordingState.IsRecording then
-            startRecording()
-            recordBtn.Text = "Stop Rec"
-            recordBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
-        else
-            stopRecording()
-            recordBtn.Text = "Record"
-            recordBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-        end
-    end)
-    
-    local playBtn = createButton("PlayBtn", "Play", UDim2.new(0, 100, 0, 0), function()
-        if not RecordingState.IsPlaying then
-            playRecording()
-            playBtn.Text = "Stop"
-            playBtn.BackgroundColor3 = Color3.fromRGB(50, 200, 50)
-        else
-            stopPlayback()
-            playBtn.Text = "Play"
-            playBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-        end
-    end)
-    
-    createButton("PauseBtn", "Pause", UDim2.new(0, 200, 0, 0), pausePlayback)
-    
-    createButton("UndoBtn", "Undo", UDim2.new(0, 300, 0, 0), performUndo)
-    
-    createButton("RedoBtn", "Redo", UDim2.new(0, 400, 0, 0), performRedo)
-    
-    createButton("ExportBtn", "Export", UDim2.new(0, 500, 0, 0), function()
-        local json = exportRecording()
-        -- Copy to clipboard (in real implementation, you'd use clipboard API)
-        print("JSON:", json)
-    end)
-    
-    -- Info frame
-    local infoFrame = Instance.new("Frame")
-    infoFrame.Name = "InfoFrame"
-    infoFrame.Size = UDim2.new(1, -20, 0, 80)
-    infoFrame.Position = UDim2.new(0, 10, 0, 120)
-    infoFrame.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
-    infoFrame.BorderSizePixel = 0
-    infoFrame.Parent = mainFrame
-    
-    local infoCorner = Instance.new("UICorner")
-    infoCorner.CornerRadius = UDim.new(0, 6)
-    infoCorner.Parent = infoFrame
-    
-    -- Info labels
-    local statusLabel = Instance.new("TextLabel")
-    statusLabel.Name = "StatusLabel"
-    statusLabel.Size = UDim2.new(1, -10, 0, 20)
-    statusLabel.Position = UDim2.new(0, 5, 0, 5)
-    statusLabel.BackgroundTransparency = 1
-    statusLabel.Text = "Status: Idle"
-    statusLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-    statusLabel.TextSize = 14
-    statusLabel.Font = Enum.Font.Gotham
-    statusLabel.TextXAlignment = Enum.TextXAlignment.Left
-    statusLabel.Parent = infoFrame
-    
-    local framesLabel = Instance.new("TextLabel")
-    framesLabel.Name = "FramesLabel"
-    framesLabel.Size = UDim2.new(1, -10, 0, 20)
-    framesLabel.Position = UDim2.new(0, 5, 0, 25)
-    framesLabel.BackgroundTransparency = 1
-    framesLabel.Text = "Frames: 0"
-    framesLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-    framesLabel.TextSize = 14
-    framesLabel.Font = Enum.Font.Gotham
-    framesLabel.TextXAlignment = Enum.TextXAlignment.Left
-    framesLabel.Parent = infoFrame
-    
-    local currentFrameLabel = Instance.new("TextLabel")
-    currentFrameLabel.Name = "CurrentFrameLabel"
-    currentFrameLabel.Size = UDim2.new(1, -10, 0, 20)
-    currentFrameLabel.Position = UDim2.new(0, 5, 0, 45)
-    currentFrameLabel.BackgroundTransparency = 1
-    currentFrameLabel.Text = "Current Frame: 0"
-    currentFrameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-    currentFrameLabel.TextSize = 14
-    currentFrameLabel.Font = Enum.Font.Gotham
-    currentFrameLabel.TextXAlignment = Enum.TextXAlignment.Left
-    currentFrameLabel.Parent = infoFrame
-    
-    -- Timeline frame
-    local timelineFrame = Instance.new("Frame")
-    timelineFrame.Name = "TimelineFrame"
-    timelineFrame.Size = UDim2.new(1, -20, 0, 150)
-    timelineFrame.Position = UDim2.new(0, 10, 0, 210)
-    timelineFrame.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
-    timelineFrame.BorderSizePixel = 0
-    timelineFrame.Parent = mainFrame
-    
-    local timelineCorner = Instance.new("UICorner")
-    timelineCorner.CornerRadius = UDim.new(0, 6)
-    timelineCorner.Parent = timelineFrame
-    
-    -- Timeline title
-    local timelineTitle = Instance.new("TextLabel")
-    timelineTitle.Name = "TimelineTitle"
-    timelineTitle.Size = UDim2.new(1, 0, 0, 30)
-    timelineTitle.BackgroundTransparency = 1
-    timelineTitle.Text = "Timeline"
-    timelineTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
-    timelineTitle.TextSize = 16
-    timelineTitle.Font = Enum.Font.GothamBold
-    timelineTitle.Parent = timelineFrame
-    
-    -- Timeline scroll frame
-    local timelineScroll = Instance.new("ScrollingFrame")
-    timelineScroll.Name = "TimelineScroll"
-    timelineScroll.Size = UDim2.new(1, -10, 1, -40)
-    timelineScroll.Position = UDim2.new(0, 5, 0, 35)
-    timelineScroll.BackgroundTransparency = 1
-    timelineScroll.BorderSizePixel = 0
-    timelineScroll.ScrollBarThickness = 6
-    timelineScroll.Parent = timelineFrame
-    
-    -- Timeline list layout
-    local listLayout = Instance.new("UIListLayout")
-    listLayout.SortOrder = Enum.SortOrder.LayoutOrder
-    listLayout.Padding = UDim.new(0, 2)
-    listLayout.Parent = timelineScroll
-    
-    -- Update GUI function
-    local function updateGUI()
-        -- Update status
-        if RecordingState.IsRecording then
-            statusLabel.Text = "Status: Recording"
-            statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-        elseif RecordingState.IsPlaying then
-            statusLabel.Text = RecordingState.IsPaused and "Status: Paused" or "Status: Playing"
-            statusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
-        else
-            statusLabel.Text = "Status: Idle"
-            statusLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-        end
-        
-        -- Update frames count
-        framesLabel.Text = "Frames: " .. #Recording.Frames
-        
-        -- Update current frame
-        currentFrameLabel.Text = "Current Frame: " .. Recording.CurrentFrame .. " / " .. #Recording.Frames
-        
-        -- Update timeline
-        timelineScroll:ClearAllChildren()
-        
-        local listLayout = Instance.new("UIListLayout")
-        listLayout.SortOrder = Enum.SortOrder.LayoutOrder
-        listLayout.Padding = UDim.new(0, 2)
-        listLayout.Parent = timelineScroll
-        
-        for i, frame in ipairs(Recording.Frames) do
-            local frameButton = Instance.new("TextButton")
-            frameButton.Name = "Frame" .. i
-            frameButton.Size = UDim2.new(1, -6, 0, 25)
-            frameButton.BackgroundColor3 = i == Recording.CurrentFrame and Color3.fromRGB(80, 120, 180) or Color3.fromRGB(70, 70, 70)
-            frameButton.BorderSizePixel = 0
-            frameButton.Text = string.format("Frame %d - Pos: %.1f, %.1f, %.1f", i, frame.Position.X, frame.Position.Y, frame.Position.Z)
-            frameButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-            frameButton.TextSize = 12
-            frameButton.Font = Enum.Font.Gotham
-            frameButton.TextXAlignment = Enum.TextXAlignment.Left
-            frameButton.Parent = timelineScroll
-            
-            local frameCorner = Instance.new("UICorner")
-            frameCorner.CornerRadius = UDim.new(0, 4)
-            frameCorner.Parent = frameButton
-            
-            frameButton.MouseButton1Click:Connect(function()
-                jumpToFrame(i)
-                updateGUI()
-            end)
-        end
-        
-        timelineScroll.CanvasSize = UDim2.new(0, 0, 0, listLayout.AbsoluteContentSize.Y)
-    end
-    
-    -- Toggle GUI visibility
-    local toggleButton = Instance.new("TextButton")
-    toggleButton.Name = "ToggleButton"
-    toggleButton.Size = UDim2.new(0, 50, 0, 50)
-    toggleButton.Position = UDim2.new(1, -60, 0, 10)
-    toggleButton.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-    toggleButton.BorderSizePixel = 0
-    toggleButton.Text = "📹"
-    toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    toggleButton.TextSize = 24
-    toggleButton.Font = Enum.Font.GothamBold
-    toggleButton.Parent = screenGui
-    
-    local toggleCorner = Instance.new("UICorner")
-    toggleCorner.CornerRadius = UDim.new(0, 8)
-    toggleCorner.Parent = toggleButton
-    
-    toggleButton.MouseButton1Click:Connect(function()
-        mainFrame.Visible = not mainFrame.Visible
-    end)
-    
-    -- Update GUI loop
-    RunService.Heartbeat:Connect(function()
-        if mainFrame.Visible then
-            updateGUI()
-        end
-    end)
-    
-    screenGui.Parent = player:WaitForChild("PlayerGui")
-    
-    print("Movement Recorder GUI loaded!")
+    return btn
 end
 
---[[═══════════════════════════════════════════════════════════════════════════
-    KEYBOARD SHORTCUTS
-═══════════════════════════════════════════════════════════════════════════════]]
+-- Buttons
+local recordBtn = createButton("Record", "START RECORD", UDim2.new(0, 10, 0, 120), function()
+    if not isRecording then
+        startRecord()
+        recordBtn.Text = "STOP RECORD"
+        recordBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+    else
+        stopRecord()
+        recordBtn.Text = "START RECORD"
+        recordBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    end
+end)
 
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if gameProcessed then return end
+local playBtn = createButton("Play", "PLAY", UDim2.new(0, 210, 0, 120), function()
+    if not isPlaying then
+        startPlay()
+        playBtn.Text = "STOP PLAY"
+        playBtn.BackgroundColor3 = Color3.fromRGB(50, 200, 50)
+    else
+        stopPlay()
+        playBtn.Text = "PLAY"
+        playBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    end
+end)
+
+createButton("Undo", "UNDO (Ctrl+Z)", UDim2.new(0, 10, 0, 170), undo)
+createButton("Redo", "REDO (Ctrl+Y)", UDim2.new(0, 210, 0, 170), redo)
+createButton("Export", "EXPORT", UDim2.new(0, 10, 0, 220), exportFrames)
+createButton("Clear", "CLEAR ALL", UDim2.new(0, 210, 0, 220), function()
+    saveHistory()
+    frames = {}
+    currentFrame = 1
+    print("All frames cleared")
+end)
+
+-- Timeline
+local timelineLabel = Instance.new("TextLabel")
+timelineLabel.Size = UDim2.new(1, -20, 0, 30)
+timelineLabel.Position = UDim2.new(0, 10, 0, 270)
+timelineLabel.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+timelineLabel.BorderSizePixel = 1
+timelineLabel.BorderColor3 = Color3.fromRGB(255, 255, 255)
+timelineLabel.Text = "TIMELINE"
+timelineLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+timelineLabel.TextSize = 16
+timelineLabel.Font = Enum.Font.SourceSansBold
+timelineLabel.Parent = main
+
+local timeline = Instance.new("ScrollingFrame")
+timeline.Size = UDim2.new(1, -20, 0, 180)
+timeline.Position = UDim2.new(0, 10, 0, 310)
+timeline.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+timeline.BorderSizePixel = 1
+timeline.BorderColor3 = Color3.fromRGB(255, 255, 255)
+timeline.ScrollBarThickness = 8
+timeline.Parent = main
+
+local layout = Instance.new("UIListLayout")
+layout.SortOrder = Enum.SortOrder.LayoutOrder
+layout.Padding = UDim.new(0, 2)
+layout.Parent = timeline
+
+-- Update timeline
+local function updateTimeline()
+    -- Clear
+    for _, child in ipairs(timeline:GetChildren()) do
+        if child:IsA("TextButton") then
+            child:Destroy()
+        end
+    end
     
-    -- Ctrl+Z: Undo
+    -- Add frames
+    for i, frame in ipairs(frames) do
+        local frameBtn = Instance.new("TextButton")
+        frameBtn.Name = "Frame" .. i
+        frameBtn.Size = UDim2.new(1, -8, 0, 25)
+        frameBtn.BackgroundColor3 = (i == currentFrame) and Color3.fromRGB(100, 150, 255) or Color3.fromRGB(60, 60, 60)
+        frameBtn.BorderSizePixel = 0
+        frameBtn.Text = string.format("%d: %.1f, %.1f, %.1f", i, frame.pos.X, frame.pos.Y, frame.pos.Z)
+        frameBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        frameBtn.TextSize = 14
+        frameBtn.Font = Enum.Font.SourceSans
+        frameBtn.TextXAlignment = Enum.TextXAlignment.Left
+        frameBtn.Parent = timeline
+        
+        frameBtn.MouseButton1Click:Connect(function()
+            jumpToFrame(i)
+        end)
+        
+        -- Right click to delete
+        frameBtn.MouseButton2Click:Connect(function()
+            deleteFrame(i)
+        end)
+    end
+    
+    timeline.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y)
+end
+
+-- Update GUI
+local function updateGUI()
+    local status = "Idle"
+    if isRecording then
+        status = "Recording"
+    elseif isPlaying then
+        status = "Playing"
+    end
+    
+    info.Text = string.format("Frames: %d\nCurrent: %d\nStatus: %s", #frames, currentFrame, status)
+    updateTimeline()
+end
+
+-- Update loop
+RunService.Heartbeat:Connect(function()
+    if main.Visible then
+        updateGUI()
+    end
+end)
+
+-- Toggle GUI with F1
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    
+    if input.KeyCode == Enum.KeyCode.F1 then
+        main.Visible = not main.Visible
+        print("GUI toggled:", main.Visible)
+    end
+    
+    -- Ctrl+Z - Undo
     if input.KeyCode == Enum.KeyCode.Z and UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
-        performUndo()
+        undo()
     end
     
-    -- Ctrl+Y: Redo
+    -- Ctrl+Y - Redo
     if input.KeyCode == Enum.KeyCode.Y and UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
-        performRedo()
+        redo()
     end
     
-    -- Space: Play/Pause
-    if input.KeyCode == Enum.KeyCode.Space and not UserInputService:GetFocusedTextBox() then
-        if RecordingState.IsPlaying then
-            pausePlayback()
+    -- Space - Play/Stop
+    if input.KeyCode == Enum.KeyCode.Space and main.Visible then
+        if not isPlaying then
+            startPlay()
         else
-            playRecording()
-        end
-    end
-    
-    -- R: Record
-    if input.KeyCode == Enum.KeyCode.R and UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
-        if not RecordingState.IsRecording then
-            startRecording()
-        else
-            stopRecording()
+            stopPlay()
         end
     end
 end)
 
---[[═══════════════════════════════════════════════════════════════════════════
-    INITIALIZATION
-═══════════════════════════════════════════════════════════════════════════════]]
+-- Parent to PlayerGui
+gui.Parent = player:WaitForChild("PlayerGui")
 
--- Handle character respawn
-player.CharacterAdded:Connect(function(newCharacter)
-    character = newCharacter
-    humanoid = character:WaitForChild("Humanoid")
-    rootPart = character:WaitForChild("HumanoidRootPart")
-    
-    -- Stop any ongoing recording or playback
-    if RecordingState.IsRecording then
-        stopRecording()
-    end
-    
-    if RecordingState.IsPlaying then
-        stopPlayback()
-    end
-end)
-
--- Initialize GUI
-createGUI()
-
-print("═══════════════════════════════════════════════════════════════")
-print("Movement Recorder System Loaded!")
-print("═══════════════════════════════════════════════════════════════")
-print("Controls:")
-print("- Click the 📹 button to toggle the GUI")
-print("- Ctrl+R: Start/Stop Recording")
-print("- Space: Play/Pause")
-print("- Ctrl+Z: Undo")
-print("- Ctrl+Y: Redo")
-print("═══════════════════════════════════════════════════════════════")
+print("=== Movement Recorder Ready! ===")
+print("Press F1 to open GUI")
+print("================================")
