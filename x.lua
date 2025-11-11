@@ -546,13 +546,16 @@ mainFrame.Active = true
 mainFrame.Draggable = not State.isMobile
 mainFrame.Parent = screenGui
 
-local floatingIcon = Instance.new("ImageButton")
+local floatingIcon = Instance.new("TextButton")
 floatingIcon.Name = "FloatingIcon"
 floatingIcon.Size = UDim2.new(0, CONFIG.FLOATING_ICON_SIZE, 0, CONFIG.FLOATING_ICON_SIZE)
 floatingIcon.Position = UDim2.new(0.95, -CONFIG.FLOATING_ICON_SIZE, 0.5, -CONFIG.FLOATING_ICON_SIZE/2)
 floatingIcon.BackgroundColor3 = Color3.fromRGB(0, 200, 255)
 floatingIcon.BorderSizePixel = 0
-floatingIcon.Text = ""
+floatingIcon.Text = "📹"
+floatingIcon.TextColor3 = Color3.fromRGB(255, 255, 255)
+floatingIcon.Font = Enum.Font.GothamBold
+floatingIcon.TextSize = 24
 floatingIcon.Visible = false
 floatingIcon.Active = true
 floatingIcon.Draggable = true
@@ -561,15 +564,6 @@ floatingIcon.Parent = screenGui
 local iconCorner = Instance.new("UICorner")
 iconCorner.CornerRadius = UDim.new(0.5, 0)
 iconCorner.Parent = floatingIcon
-
-local iconLabel = Instance.new("TextLabel")
-iconLabel.Size = UDim2.new(1, 0, 1, 0)
-iconLabel.BackgroundTransparency = 1
-iconLabel.Text = "📹"
-iconLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-iconLabel.Font = Enum.Font.GothamBold
-iconLabel.TextSize = 24
-iconLabel.Parent = floatingIcon
 
 local titleBar = Instance.new("Frame")
 titleBar.Name = "TitleBar"
